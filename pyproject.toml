@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-observer"
+version = "0.1.0"
+description = "Request observability for vLLM and vLLM Ascend"
+requires-python = ">=3.10"
+dependencies = ["prometheus-client>=0.20,<1", "protobuf>=5,<8", "cramjam>=2.8,<3"]
+
+[project.optional-dependencies]
+langfuse = ["opentelemetry-sdk>=1.30,<2", "opentelemetry-exporter-otlp-proto-http>=1.30,<2"]
+dev = ["pytest>=8,<9", "uvicorn>=0.30,<1", "ruff>=0.9,<1"]
+
+[project.entry-points."vllm.general_plugins"]
+observer_clock = "vllm_observer.engine_clock:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
