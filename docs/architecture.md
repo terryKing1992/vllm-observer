@@ -28,7 +28,7 @@ flowchart LR
 
 ## 采集与时间语义
 
-generate 包装将外部引擎 request ID 关联当前 HTTP trace。后台统计通过 external_req_id 查找，不假设后台任务继承 ContextVar。生成器结束和取消释放映射；同 HTTP 多序列汇总。安装在 API middleware 构造阶段，不在 TP worker 中启动服务。原方法先执行，观测处理错误被隔离；签名检查不能替代真实兼容性测试。
+sitecustomize 在相关模块由 vLLM 自己加载完成后安装可选包装；不注册vLLM插件或修改其文件。generate 包装将外部引擎 request ID 关联当前 HTTP trace及当前generation。后台统计通过 external_req_id 查找，不假设继承 ContextVar。生成器结束和取消释放映射；同 HTTP 多调用各自生成独立generation，多序列阶段携带sequence_index，不强行串行拼接。worker仅附加时间元数据，不启动监控服务。原方法先执行，观测错误被隔离；签名/AST检查不能替代真实兼容性测试。
 
 | 阶段 | 定义 |
 |---|---|
@@ -40,7 +40,11 @@ generate 包装将外部引擎 request ID 关联当前 HTTP trace。后台统计
 
 decode mean 按 token 加权，不是 kernel 或调度迭代平均耗时。推测解码一步可产生多 token。单 token 输出 count=0、mean=0。并行序列阶段之和可能超过 HTTP 时间，不能相加当作完整时间轴。缺失阶段保持缺失。
 
-引擎使用已计算的差值，HTTP 使用 perf_counter，墙钟只给 HTTP observation 定位。没有跨进程时钟拼接，因此 Langfuse 阶段为属性，不伪造 child span 起止时间。
+HTTP使用perf_counter差值和请求进入时的墙钟锚点。EngineCore在最终输出上附带同进程monotonic/Unix时间校准，API仅用它转换该引擎的queue/scheduled/first/last边界，不直接比较不同进程的monotonic。校准采样误差作为metadata记录；跨主机要求NTP同步，墙钟跳变/明显偏差会使阶段校验失败。
+
+Langfuse上报真实子span：serve-model-request → generate-response → queue/prefill/decode。decode用首/末token边界形成单个区间并附总数与均值，不按均值制造多个token区间。缺少校准或边界不合法时保留generation和数值汇总，标记timeline_unavailable，不猜测子span起止。
+
+官方skill要求有层级、正确observation类型、模型/token、稳定名字、明确输入输出和环境。这里遵循其[最佳实践](https://langfuse.com/docs/observability/best-practices)，使用[官方支持的vLLM/OTel方式](https://langfuse.com/integrations/model-providers/vllm)保留显式历史起止时间。OpenTelemetry SDK验证版本为1.44.0；未另加Langfuse SDK以避免双重provider/导出。每次请求的所有span一次批量OTLP上报。输入输出仅给路线、计数、状态摘要，不扩大为prompt/文本采集。
 
 ## 实例主动上报
 

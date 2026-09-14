@@ -42,9 +42,16 @@ async def application(scope, receive, send):
         end = trace.now_ns()
         measured = (end - start) / 1e9
         trace.add(name, measured)
-        trace.interval(generation, name, start, end, count=1,
-                       total_seconds=measured, mean_seconds=measured,
-                       timing_source="demo_measured_wall_interval")
+        trace.interval(
+            generation,
+            name,
+            start,
+            end,
+            count=1,
+            total_seconds=measured,
+            mean_seconds=measured,
+            timing_source="demo_measured_wall_interval",
+        )
     generation["completion_start_ns"] = trace.now_ns()
     trace.engine_requests = 1
     await send(
@@ -69,9 +76,16 @@ async def application(scope, receive, send):
     decode_end = trace.now_ns()
     measured = (decode_end - decode_start) / 1e9
     trace.add("decode", measured, 3)
-    trace.interval(generation, "decode", decode_start, decode_end, count=3,
-                   total_seconds=measured, mean_seconds=measured / 3,
-                   timing_source="demo_measured_wall_interval")
+    trace.interval(
+        generation,
+        "decode",
+        decode_start,
+        decode_end,
+        count=3,
+        total_seconds=measured,
+        mean_seconds=measured / 3,
+        timing_source="demo_measured_wall_interval",
+    )
     generation["end_ns"] = trace.now_ns()
     await send({"type": "http.response.body", "body": b"data: [DONE]\n\n"})
 

@@ -1,19 +1,22 @@
 """Version-checked instrumentation; never imports torch or touches devices."""
 
-import functools
 import asyncio
+import functools
 import inspect
 import logging
 import math
 
 from .core import current_request
-from .engine_clock import CLOCK_MONO, CLOCK_UNIX, CLOCK_ERROR
+from .engine_clock import CLOCK_ERROR, CLOCK_MONO, CLOCK_UNIX
 
 logger = logging.getLogger("vllm_observer")
 
 
 def record_timeline(trace, generation, stat, raw):
-    for field, key in (("num_prompt_tokens", "input"), ("num_generation_tokens", "output")):
+    for field, key in (
+        ("num_prompt_tokens", "input"),
+        ("num_generation_tokens", "output"),
+    ):
         value = getattr(stat, field, None)
         if value is not None:
             generation["usage"][key] = generation["usage"].get(key, 0) + value
@@ -25,24 +28,38 @@ def record_timeline(trace, generation, stat, raw):
         return
     mono = float(clock[CLOCK_MONO])
     wall = int(clock[CLOCK_UNIX])
-    edges = [getattr(raw, key) for key in
-             ("queued_ts", "scheduled_ts", "first_token_ts", "last_token_ts")]
+    edges = [
+        getattr(raw, key)
+        for key in ("queued_ts", "scheduled_ts", "first_token_ts", "last_token_ts")
+    ]
     if not all(math.isfinite(value) and value > 0 for value in edges):
         generation["metadata"]["timeline_unavailable"] = "incomplete_engine_timestamps"
         return
     stamps = [wall + int((edge - mono) * 1e9) for edge in edges]
-    if stamps != sorted(stamps) or not generation["start_ns"] <= stamps[0] <= stamps[-1] <= trace.now_ns():
+    if (
+        stamps != sorted(stamps)
+        or not generation["start_ns"] <= stamps[0] <= stamps[-1] <= trace.now_ns()
+    ):
         generation["metadata"]["timeline_unavailable"] = "clock_skew_or_invalid_order"
         return
     generation.setdefault("completion_start_ns", stamps[2])
     count = max(0, stat.num_generation_tokens - 1)
-    for i, (name, repetitions) in enumerate((("queue", 1), ("prefill", 1), ("decode", count))):
+    for i, (name, repetitions) in enumerate(
+        (("queue", 1), ("prefill", 1), ("decode", count))
+    ):
         duration = (stamps[i + 1] - stamps[i]) / 1e9
-        trace.interval(generation, name, stamps[i], stamps[i + 1],
-                       timing_source="engine_monotonic_calibrated_to_wall",
-                       calibration_error_ns=int(clock[CLOCK_ERROR]), sequence_index=sequence,
-                       count=repetitions, total_seconds=duration,
-                       mean_seconds=duration / repetitions if repetitions else 0)
+        trace.interval(
+            generation,
+            name,
+            stamps[i],
+            stamps[i + 1],
+            timing_source="engine_monotonic_calibrated_to_wall",
+            calibration_error_ns=int(clock[CLOCK_ERROR]),
+            sequence_index=sequence,
+            count=repetitions,
+            total_seconds=duration,
+            mean_seconds=duration / repetitions if repetitions else 0,
+        )
 
 
 def install(engine_cls=None, stats_cls=None):
@@ -107,7 +124,9 @@ def install(engine_cls=None, stats_cls=None):
                 trace.add(
                     "decode", stat.decode_time, max(0, stat.num_generation_tokens - 1)
                 )
-                raw = update_signature.bind(self, *args, **kwargs).arguments.get("req_stats")
+                raw = update_signature.bind(self, *args, **kwargs).arguments.get(
+                    "req_stats"
+                )
                 record_timeline(trace, generation, stat, raw)
         except Exception:
             logger.exception("Observer could not collect request statistics")
@@ -125,10 +144,18 @@ def install(engine_cls=None, stats_cls=None):
             result = output_update(self, *args, **kwargs)
             try:
                 output = args[0] if args else kwargs.get("output")
-                if output.finished and output.trace_headers and CLOCK_MONO in output.trace_headers:
-                    raw = output_signature.bind(self, *args, **kwargs).arguments["req_stats"]
-                    raw._observer_clock = {key: output.trace_headers[key]
-                                           for key in (CLOCK_MONO, CLOCK_UNIX, CLOCK_ERROR)}
+                if (
+                    output.finished
+                    and output.trace_headers
+                    and CLOCK_MONO in output.trace_headers
+                ):
+                    raw = output_signature.bind(self, *args, **kwargs).arguments[
+                        "req_stats"
+                    ]
+                    raw._observer_clock = {
+                        key: output.trace_headers[key]
+                        for key in (CLOCK_MONO, CLOCK_UNIX, CLOCK_ERROR)
+                    }
             except Exception:
                 logger.exception("Observer could not read engine clock")
             return result

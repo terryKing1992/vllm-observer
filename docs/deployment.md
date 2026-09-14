@@ -8,6 +8,8 @@
 
 ## 配置
 
+真实vLLM自动接入使用 [sitecustomize可选启动](sitecustomize.md)：PYTHONPATH包含bootstrap目录，OBSERVER_ENABLED=1；不再需要 --middleware 或 vllm.general_plugins 入口。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | OBSERVER_SERVICE | vllm | 服务名 |
@@ -51,6 +53,6 @@ Kubernetes 通过 Downward API 注入 metadata.uid 为 instance ID，配置可�
 
 404：检查 receiver 开关和完整 /api/v1/write 路径。401/403：检查网关凭证。400：检查服务器日志、重复 instance ID 或机器时钟。无心跳：确认 ASGI lifespan 开启及 PUSH_ENABLED=1。无引擎阶段：确认 V1 AsyncLLM、stats 未关闭；取消/失败请求可能没有完成统计。
 
-源码基线：vLLM b3124a8237f21fcd3a4510002a5e2925b0dbedfe，Ascend c04c5db026e5cb39ef843c72496384eb37789775。不是硬件兼容认证；升级须重验。Windows 是模拟/观察器环境，实际 NPU 推理在 Linux 验证。
+源码基线：vLLM b3124a8237f21fcd3a4510002a5e2925b0dbedfe，Ascend c04c5db026e5cb39ef843c72496384eb37789775。当前源码可位于本工程子模块或工作区相邻目录，AST测试兼容两种布局。不代表硬件兼容认证；升级须重验。Windows 是模拟/观察器环境，实际 NPU 推理在 Linux 验证。
 
 协议参考：[Remote Write 1.0](https://prometheus.io/docs/specs/prw/remote_write_spec/)，[Prometheus 接收端开关](https://prometheus.io/docs/prometheus/latest/storage/)。

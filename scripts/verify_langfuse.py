@@ -1,98 +1,164 @@
-"""Send one demo request through the middleware, then verify Langfuse ingestion.
+"""Send one demo trace and audit its timeline through the official Langfuse CLI.
 
-Credentials are read exclusively from LANGFUSE_* environment variables.
+Credentials are read only from LANGFUSE_* environment variables. Use --trace-id
+to re-audit an existing demo trace without creating another request.
 """
 
+import argparse
 import asyncio
-import base64
 import json
 import os
+import shutil
+import subprocess
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 
 
-def main():
-    base = os.environ["LANGFUSE_BASE_URL"].rstrip("/")
-    auth = base64.b64encode(
-        f"{os.environ['LANGFUSE_PUBLIC_KEY']}:{os.environ['LANGFUSE_SECRET_KEY']}".encode()
-    ).decode()
-    os.environ["OBSERVER_PUSH_ENABLED"] = "0"
-    os.environ["OBSERVER_LANGFUSE_ENABLED"] = "1"
-    os.environ["OBSERVER_SERVICE"] = "observer-validation"
-    os.environ["OBSERVER_MODEL"] = "demo-model"
-    os.environ["OBSERVER_INSTANCE_ID"] = "windows-langfuse-check"
-    from vllm_observer.demo import app
-
-    identifier = uuid.uuid4().hex
-    messages = []
-
-    async def request():
-        async def receive():
-            return {"type": "http.request", "body": b"{}"}
-
-        async def send(message):
-            messages.append(message)
-
-        await app(
-            {
-                "type": "http",
-                "path": "/v1/chat/completions",
-                "headers": [(b"x-trace-id", identifier.encode())],
-            },
-            receive,
-            send,
-        )
-
-    try:
-        asyncio.run(request())
-        assert messages[-1]["body"] == b"data: [DONE]\n\n"
-        assert (b"x-trace-id", identifier.encode()) in messages[0]["headers"]
-        assert app.exporter.close(timeout=10), "Export worker did not finish"
-        assert app.exporter.failed == 0, "Langfuse export failed"
-    finally:
-        app.exporter.close(timeout=10)
-        app.exporter.sink.provider.shutdown()
-    print(json.dumps({"export": "accepted", "trace_id": identifier}), flush=True)
-
-    now = datetime.now(timezone.utc)
-    query = urllib.parse.urlencode(
-        {
-            "traceId": identifier,
-            "fields": "core,basic,metadata",
-            "fromStartTime": (now - timedelta(minutes=5)).isoformat(),
-            "toStartTime": (now + timedelta(minutes=5)).isoformat(),
-            "limit": 10,
-        }
+def audit_observations(rows, identifier):
+    expected = {
+        "serve-model-request",
+        "generate-response",
+        "queue",
+        "prefill",
+        "decode",
+    }
+    assert len(rows) == 5 and {row["name"] for row in rows} == expected
+    nodes = {row["name"]: row for row in rows}
+    root, generation = nodes["serve-model-request"], nodes["generate-response"]
+    assert root["type"] == "SPAN" and not root.get("parentObservationId")
+    assert generation["type"] == "GENERATION"
+    assert generation["parentObservationId"] == root["id"]
+    assert generation["model"] == "demo-model"
+    assert generation["usageDetails"]["input"] == 8
+    assert generation["usageDetails"]["output"] == 4
+    by_id = {row["id"]: row for row in rows}
+    for row in rows:
+        assert row["traceId"] == identifier
+        start = datetime.fromisoformat(row["startTime"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(row["endTime"].replace("Z", "+00:00"))
+        assert end >= start
+        parent = by_id.get(row.get("parentObservationId"))
+        if parent:
+            assert (
+                datetime.fromisoformat(parent["startTime"].replace("Z", "+00:00"))
+                <= start
+            )
+            assert end <= datetime.fromisoformat(
+                parent["endTime"].replace("Z", "+00:00")
+            )
+    for name in ("queue", "prefill", "decode"):
+        assert nodes[name]["type"] == "SPAN"
+        assert nodes[name]["parentObservationId"] == generation["id"]
+    decode = nodes["decode"]["metadata"]
+    assert int(decode["count"]) == 3
+    assert (
+        abs(float(decode["total_seconds"]) / 3 - float(decode["mean_seconds"])) < 1e-8
     )
-    url = base + "/api/public/v2/observations?" + query
+    return nodes
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--trace-id", help="Audit an existing demo trace only")
+    args = parser.parse_args()
+    base = os.environ["LANGFUSE_BASE_URL"].rstrip("/")
+    os.environ["LANGFUSE_HOST"] = base
+    identifier = args.trace_id or uuid.uuid4().hex
+    if not args.trace_id:
+        os.environ.update(
+            OBSERVER_PUSH_ENABLED="0",
+            OBSERVER_LANGFUSE_ENABLED="1",
+            OBSERVER_SERVICE="observer-validation",
+            OBSERVER_MODEL="demo-model",
+            OBSERVER_INSTANCE_ID="windows-langfuse-check",
+            OBSERVER_ENVIRONMENT="development",
+        )
+        from vllm_observer.demo import app
+
+        messages = []
+
+        async def request():
+            async def receive():
+                return {"type": "http.request", "body": b"{}"}
+
+            async def send(message):
+                messages.append(message)
+
+            await app(
+                {
+                    "type": "http",
+                    "path": "/v1/chat/completions",
+                    "headers": [(b"x-trace-id", identifier.encode())],
+                },
+                receive,
+                send,
+            )
+
+        try:
+            asyncio.run(request())
+            assert messages[-1]["body"] == b"data: [DONE]\n\n"
+            assert (b"x-trace-id", identifier.encode()) in messages[0]["headers"]
+            assert app.exporter.close(timeout=10), "Export worker did not finish"
+            assert app.exporter.failed == 0, "Langfuse export failed"
+        finally:
+            app.exporter.close(timeout=10)
+            app.exporter.sink.provider.shutdown()
+        print(json.dumps({"export": "accepted", "trace_id": identifier}), flush=True)
+
+    npx = shutil.which("npx.cmd") or shutil.which("npx")
+    if not npx:
+        raise RuntimeError("Install Node.js to use the official langfuse-cli audit")
+    now = datetime.now(timezone.utc)
+    command = [
+        npx,
+        "--yes",
+        "langfuse-cli@latest",
+        "api",
+        "observations",
+        "list",
+        "--trace-id",
+        identifier,
+        "--fields",
+        "core,basic,metadata,model,usage,io,time",
+        "--from-start-time",
+        (now - timedelta(days=1)).isoformat(),
+        "--to-start-time",
+        (now + timedelta(minutes=5)).isoformat(),
+        "--limit",
+        "100",
+        "--json",
+    ]
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
-        req = urllib.request.Request(url, headers={"Authorization": "Basic " + auth})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                result = json.load(response)
-        except urllib.error.HTTPError as error:
-            # Output only status, never credentials or request headers.
-            raise RuntimeError(
-                f"Langfuse read API returned HTTP {error.code}"
-            ) from None
-        rows = result.get("data", [])
-        if rows:
-            row = next(row for row in rows if row["traceId"] == identifier)
-            assert row["type"].upper() == "GENERATION", row["type"]
+        result = subprocess.run(
+            command, capture_output=True, text=True, encoding="utf-8", timeout=45
+        )
+        if result.returncode:
+            raise RuntimeError(f"Langfuse CLI read failed (exit {result.returncode})")
+        envelope = json.loads(result.stdout)
+        body = envelope.get("body", envelope)
+        rows = body.get("data", [])
+        if len(rows) >= 5:
+            nodes = audit_observations(rows, identifier)
+            project = nodes["serve-model-request"]["projectId"]
             print(
                 json.dumps(
                     {
-                        "ingestion": "verified",
+                        "ingestion": "hierarchy_verified",
                         "trace_id": identifier,
-                        "observation_id": row["id"],
-                        "type": row["type"],
-                        "project_id": row.get("projectId"),
-                        "metadata": row.get("metadata"),
+                        "trace_url": f"{base}/project/{project}/traces/{identifier}",
+                        "observations": [
+                            {
+                                "name": row["name"],
+                                "id": row["id"],
+                                "parent_id": row.get("parentObservationId"),
+                                "type": row["type"],
+                                "start": row["startTime"],
+                                "end": row["endTime"],
+                            }
+                            for row in nodes.values()
+                        ],
                     },
                     ensure_ascii=False,
                 ),
@@ -100,9 +166,7 @@ def main():
             )
             return
         time.sleep(2)
-    raise RuntimeError(
-        f"Export accepted but observation not visible within 120s: {identifier}"
-    )
+    raise RuntimeError(f"Trace hierarchy not visible within 120s: {identifier}")
 
 
 if __name__ == "__main__":

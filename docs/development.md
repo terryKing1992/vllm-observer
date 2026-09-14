@@ -10,6 +10,8 @@
 core 是事件/Filter，adapter 是版本相关采集，middleware 是 HTTP 生命周期，metrics 是指标，exporter 是后台上报，demo 是无卡演示。部署在 deploy，指导在 docs。
 remote_write 是实例定时主动推送任务及 Remote Write 编码；metrics 只负责内存采集，请求过滤器不执行指标网络上报。新增指标使用同一 registry 即自动进入下一次推送。
 
+bootstrap/sitecustomize.py 是部署入口，bootstrap.py 是延迟import包装，engine_clock.py 只在引擎最终输出附加同进程时钟校准。用module契约和真实Python子进程验证打点安装/降级，不能通过直接修改vLLM文件实现接入。Langfuse timeline结构及时间范围需上报后实际读回审计，不能只检查HTTP返回成功。
+
 新增过滤器示例（保存到可导入模块，再用 --middleware 指定该类）：
 
 ```python

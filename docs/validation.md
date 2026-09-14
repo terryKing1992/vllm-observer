@@ -2,7 +2,20 @@
 
 2026-09-15，Windows / Python 3.13。此次修正原先偏离需求的 pull 方案，改为实例直接主动 Remote Write。没有改动相邻 vLLM/Ascend 源码。
 
-## 已通过
+## 最新：sitecustomize 与火焰图层级
+
+- 已安装并应用官方 Langfuse skill：`C:/Users/Lenovo/.codex/skills/langfuse/SKILL.md`，来源 https://github.com/langfuse/skills/tree/main/skills/langfuse。
+- 依据当天读取的 instrumentation、best-practices、官方 vLLM/OTel 指导完成重构，保留 OpenTelemetry SDK 1.44.0 的显式历史时间戳，使用官方 langfuse-cli 审计。
+- 最终完整测试 **49 passed**，包含10项真实 Python 子进程启动/延迟import/失败降级测试、引擎两种step校准、缺失/偏移时钟、并发隔离、取消与迟到统计、五节点OTLP编码；Ruff lint/format通过。
+- Windows系统临时目录曾因ACL导致6个夹具创建失败；改用项目.venv内新建隔离临时目录重跑全部通过，不是跳过测试。
+- 两个上游源码子模块工作区均干净；无 vllm.general_plugins 入口，无上游源码修改。真实NPU运行仍待现场验收。
+- 最终trace：[21c5eb9e2c8f433cad062dc243f6b9dc](http://localhost:3000/project/cmu1dr0rx0006o307nusja3lt/traces/21c5eb9e2c8f433cad062dc243f6b9dc)。script从发送到CLI查询/断言完整成功。
+- 已读回5个节点：serve-model-request(SPAN) → generate-response(GENERATION) → queue/prefill/decode(SPAN)。确认父子ID、子时间落在父区间、模型demo-model、input=8/output=4、development环境，以及decode count=3且mean=total/3。
+- decode实测区间约47.476ms，均值约15.825ms；模拟sleep受Windows调度影响，因此不再将固定sleep设定值作为实测耗时。
+- 原有中间测试trace 38690701260b41c7ae240c0ff4173fc5 也已通过CLI审计。验证记录保留供检查，没有记录密钥。
+- 当前浏览器连接列表为空，未完成UI截图验收；父子层级与时间信息已经真实Langfuse API验证。
+
+## 此前：主动推送验证
 
 - 19 项 pytest：原有请求日志、Langfuse、真实本机流式 HTTP、源码契约测试全部通过。
 - 新增：实例向本机 HTTP 接收端主动 POST，检查 Remote Write headers、Snappy block/protobuf 数据、排序标签、时间戳、身份和无 traceId 标签。
@@ -22,7 +35,7 @@
 
 实际 NPU 推理及开销、Grafana 视觉效果、Kubernetes 部署与 CI 跨平台矩阵仍需对应环境验收。请求阶段是框架统计的 wall time，非 NPU kernel 时间。主动上报没有持久 WAL，不保证断网期间全部瞬时数据不丢失。
 
-## 本地 Langfuse 实际入库验证
+## 此前：Langfuse 单节点汇总格式
 
 2026-09-15，使用用户已有 http://localhost:3000 服务，执行 scripts/verify_langfuse.py。密钥仅经子进程环境注入，没有写入项目文件。
 

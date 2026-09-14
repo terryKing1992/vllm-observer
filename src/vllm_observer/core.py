@@ -46,19 +46,33 @@ class RequestTrace:
         return self.started_ns + int((time.perf_counter() - self.started) * 1e9)
 
     def begin_generation(self, request_id):
-        node = {"id": uuid.uuid4().hex[:16], "parent_id": self.root_span_id,
-                "name": "generate-response", "type": "generation",
-                "start_ns": self.now_ns(), "end_ns": None,
-                "metadata": {"request_id": request_id}, "usage": {}}
+        node = {
+            "id": uuid.uuid4().hex[:16],
+            "parent_id": self.root_span_id,
+            "name": "generate-response",
+            "type": "generation",
+            "start_ns": self.now_ns(),
+            "end_ns": None,
+            "metadata": {"request_id": request_id},
+            "usage": {},
+        }
         self.observations.append(node)
         return node
 
     def interval(self, parent, name, start_ns, end_ns, **metadata):
         if end_ns < start_ns:
             raise ValueError("Observation end precedes start")
-        self.observations.append({"id": uuid.uuid4().hex[:16], "parent_id": parent["id"],
-            "name": name, "type": "span", "start_ns": start_ns, "end_ns": end_ns,
-            "metadata": metadata})
+        self.observations.append(
+            {
+                "id": uuid.uuid4().hex[:16],
+                "parent_id": parent["id"],
+                "name": name,
+                "type": "span",
+                "start_ns": start_ns,
+                "end_ns": end_ns,
+                "metadata": metadata,
+            }
+        )
 
     def add(self, stage: str, duration: float, count: int = 1):
         self.stages.setdefault(stage, Aggregate()).add(duration, count)

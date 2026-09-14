@@ -3,8 +3,8 @@
 import base64
 import contextvars
 import copy
-import logging
 import json
+import logging
 import os
 import queue
 import threading
@@ -103,8 +103,13 @@ class LangfuseSink:
             ),
         )
         self.exporter = OTLPSpanExporter(
-            endpoint=base + "/api/public/otel/v1/traces", timeout=2,
-            headers={"Authorization": "Basic " + auth, "x-langfuse-ingestion-version": "4"})
+            endpoint=base + "/api/public/otel/v1/traces",
+            timeout=2,
+            headers={
+                "Authorization": "Basic " + auth,
+                "x-langfuse-ingestion-version": "4",
+            },
+        )
         self.provider.add_span_processor(ExportProcessor(self.exporter))
         self.success = SpanExportResult.SUCCESS
         self.tracer = self.provider.get_tracer("vllm-observer")
@@ -127,9 +132,15 @@ class LangfuseSink:
             context = trace.set_span_in_context(parent, context)
         start = event["started_ns"]
         end = start + int(event["stages"]["http_total"]["total_seconds"] * 1e9)
-        root = {"id": event["root_span_id"], "parent_id": None,
-                "name": "serve-model-request", "type": "span",
-                "start_ns": start, "end_ns": end, "metadata": {"route": event.get("route", "unknown")}}
+        root = {
+            "id": event["root_span_id"],
+            "parent_id": None,
+            "name": "serve-model-request",
+            "type": "span",
+            "start_ns": start,
+            "end_ns": end,
+            "metadata": {"route": event.get("route", "unknown")},
+        }
         nodes = [root, *event.get("observations", [])]
         contexts = {None: context}
         completed = []
@@ -141,37 +152,83 @@ class LangfuseSink:
                 node_end = node.get("end_ns") or end
                 span_token = self.desired_span.set(int(node["id"], 16))
                 try:
-                    span = self.tracer.start_span(node["name"], context=contexts[node["parent_id"]],
-                                                  start_time=node["start_ns"])
+                    span = self.tracer.start_span(
+                        node["name"],
+                        context=contexts[node["parent_id"]],
+                        start_time=node["start_ns"],
+                    )
                 finally:
                     self.desired_span.reset(span_token)
                 contexts[node["id"]] = trace.set_span_in_context(span, Context())
                 opened.append((span, node_end))
                 span.set_attribute("langfuse.observation.type", node["type"])
                 span.set_attribute("langfuse.trace.name", "serve-model-request")
-                span.set_attribute("langfuse.environment", os.getenv("OBSERVER_ENVIRONMENT", "production"))
+                span.set_attribute(
+                    "langfuse.environment",
+                    os.getenv("OBSERVER_ENVIRONMENT", "production"),
+                )
                 status = node.get("metadata", {}).get("status", event["status"])
                 span.set_attribute("observer.status", status)
                 for name in ("service", "model", "instance_id"):
                     if name in event:
-                        span.set_attribute("langfuse.observation.metadata." + name, event[name])
+                        span.set_attribute(
+                            "langfuse.observation.metadata." + name, event[name]
+                        )
                 for key, value in node.get("metadata", {}).items():
                     span.set_attribute("langfuse.observation.metadata." + key, value)
                 if node["type"] == "generation":
-                    span.set_attribute("langfuse.observation.model.name", event.get("model", "unknown"))
-                    span.set_attribute("langfuse.observation.usage_details", json.dumps(node.get("usage", {})))
+                    span.set_attribute(
+                        "langfuse.observation.model.name", event.get("model", "unknown")
+                    )
+                    span.set_attribute(
+                        "langfuse.observation.usage_details",
+                        json.dumps(node.get("usage", {})),
+                    )
                     if node.get("completion_start_ns"):
-                        span.set_attribute("langfuse.observation.completion_start_time",
-                            datetime.fromtimestamp(node["completion_start_ns"] / 1e9, timezone.utc).isoformat())
-                    span.set_attribute("langfuse.observation.input", json.dumps({
-                        "input_tokens": node.get("usage", {}).get("input"), "content_captured": False}))
-                    span.set_attribute("langfuse.observation.output", json.dumps({
-                        "output_tokens": node.get("usage", {}).get("output"), "status": status}))
+                        span.set_attribute(
+                            "langfuse.observation.completion_start_time",
+                            datetime.fromtimestamp(
+                                node["completion_start_ns"] / 1e9, timezone.utc
+                            ).isoformat(),
+                        )
+                    span.set_attribute(
+                        "langfuse.observation.input",
+                        json.dumps(
+                            {
+                                "input_tokens": node.get("usage", {}).get("input"),
+                                "content_captured": False,
+                            }
+                        ),
+                    )
+                    span.set_attribute(
+                        "langfuse.observation.output",
+                        json.dumps(
+                            {
+                                "output_tokens": node.get("usage", {}).get("output"),
+                                "status": status,
+                            }
+                        ),
+                    )
                 if node is root:
-                    span.set_attribute("langfuse.observation.input", json.dumps({"route": event.get("route"),
-                                        "model": event.get("model"), "content_captured": False}))
-                    span.set_attribute("langfuse.observation.output", json.dumps({"status": status,
-                                        "engine_requests": event["engine_requests"]}))
+                    span.set_attribute(
+                        "langfuse.observation.input",
+                        json.dumps(
+                            {
+                                "route": event.get("route"),
+                                "model": event.get("model"),
+                                "content_captured": False,
+                            }
+                        ),
+                    )
+                    span.set_attribute(
+                        "langfuse.observation.output",
+                        json.dumps(
+                            {
+                                "status": status,
+                                "engine_requests": event["engine_requests"],
+                            }
+                        ),
+                    )
                     for name, aggregate in event["stages"].items():
                         for key, value in aggregate.items():
                             span.set_attribute(f"observer.{name}.{key}", value)

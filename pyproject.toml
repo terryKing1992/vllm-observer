@@ -13,9 +13,6 @@ dependencies = ["prometheus-client>=0.20,<1", "protobuf>=5,<8", "cramjam>=2.8,<3
 langfuse = ["opentelemetry-sdk>=1.30,<2", "opentelemetry-exporter-otlp-proto-http>=1.30,<2"]
 dev = ["pytest>=8,<9", "uvicorn>=0.30,<1", "ruff>=0.9,<1"]
 
-[project.entry-points."vllm.general_plugins"]
-observer_clock = "vllm_observer.engine_clock:register"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 

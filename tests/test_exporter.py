@@ -25,20 +25,55 @@ def test_real_otlp_serialization_preserves_trace_and_aggregates(monkeypatch):
     sink = LangfuseSink()
     exporter = AsyncExportFilter(sink)
     event = RequestTrace("a" * 32, parent_span_id="b" * 16)
+    generation = event.begin_generation("unit-request")
+    generation["start_ns"] = event.started_ns + 1_000_000
+    generation["end_ns"] = event.started_ns + 800_000_000
+    generation["usage"] = {"input": 8, "output": 4}
+    for name, start_ms, end_ms in (
+        ("queue", 10, 40),
+        ("prefill", 40, 100),
+        ("decode", 100, 700),
+    ):
+        event.interval(
+            generation,
+            name,
+            event.started_ns + start_ms * 1_000_000,
+            event.started_ns + end_ms * 1_000_000,
+        )
     event.add("decode", 0.6, 3)
-    exporter.process(event.finish())
+    snapshot = event.finish()
+    snapshot["stages"]["http_total"]["total_seconds"] = 1.0
+    snapshot["model"] = "unit-model"
+    exporter.process(snapshot)
     assert exporter.close()
     assert exporter.failed == 0
     assert len(calls) == 1
     url, headers, payload = calls[0]
     assert url.endswith("/api/public/otel/v1/traces")
     assert headers["x-langfuse-ingestion-version"] == "4"
-    span = payload.resource_spans[0].scope_spans[0].spans[0]
+    spans = {span.name: span for span in payload.resource_spans[0].scope_spans[0].spans}
+    assert len(spans) == 5
+    span = spans["serve-model-request"]
     assert span.trace_id.hex() == "a" * 32
     assert span.parent_span_id.hex() == "b" * 16
     attrs = {attr.key: attr.value for attr in span.attributes}
     assert attrs["observer.decode.count"].int_value == 3
     assert attrs["observer.decode.total_seconds"].double_value == 0.6
+    assert attrs["langfuse.observation.type"].string_value == "span"
+    gen = spans["generate-response"]
+    assert gen.parent_span_id == span.span_id
+    gen_attrs = {attr.key: attr.value for attr in gen.attributes}
+    assert gen_attrs["langfuse.observation.type"].string_value == "generation"
+    assert gen_attrs["langfuse.observation.model.name"].string_value == "unit-model"
+    for name in ("queue", "prefill", "decode"):
+        child = spans[name]
+        assert child.parent_span_id == gen.span_id
+        assert gen.start_time_unix_nano <= child.start_time_unix_nano
+        assert child.end_time_unix_nano <= gen.end_time_unix_nano
+    assert (
+        spans["decode"].end_time_unix_nano - spans["decode"].start_time_unix_nano
+        == 600_000_000
+    )
     sink.provider.shutdown()
 
 

@@ -30,15 +30,7 @@ class ObserverMiddleware:
         self.app = app
         self.metrics = metrics or MetricsFilter()
         self.exporter = None
-        if filters is None:
-            filters = [self.metrics, ConsoleFilter()]
-            if os.getenv("OBSERVER_LANGFUSE_ENABLED", "0") == "1":
-                from .exporter import AsyncExportFilter, LangfuseSink
-
-                self.exporter = AsyncExportFilter(LangfuseSink())
-                self.metrics.attach_exporter(self.exporter)
-                filters.append(self.exporter)
-        self.chain = FilterChain(filters)
+        # Validate optional hooks/config before creating any background exporter.
         if instrument and os.getenv("OBSERVER_ENGINE_ENABLED", "1") == "1":
             from .adapter import install
 
@@ -48,6 +40,15 @@ class ObserverMiddleware:
             from .remote_write import RemoteWriter
 
             self.writer = RemoteWriter.from_env(self.metrics)
+        if filters is None:
+            filters = [self.metrics, ConsoleFilter()]
+            if os.getenv("OBSERVER_LANGFUSE_ENABLED", "0") == "1":
+                from .exporter import AsyncExportFilter, LangfuseSink
+
+                self.exporter = AsyncExportFilter(LangfuseSink())
+                self.metrics.attach_exporter(self.exporter)
+                filters.append(self.exporter)
+        self.chain = FilterChain(filters)
 
     async def health_check(self):
         status = 503
