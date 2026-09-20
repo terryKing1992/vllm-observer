@@ -15,11 +15,24 @@ logger = logging.getLogger("vllm_observer")
 CORE = "vllm.v1.engine.core"
 ENGINE = "vllm.v1.engine.async_llm"
 STATS = "vllm.v1.metrics.stats"
+INPUT_PROCESSOR = "vllm.v1.engine.input_processor"
+SCHEDULER = "vllm.v1.core.sched.scheduler"
+SERVING_CHAT = "vllm.entrypoints.openai.chat_completion.serving"
+SERVING_COMPLETION = "vllm.entrypoints.openai.completion.serving"
 APPS = {
     "vllm.entrypoints.launchers.app",
     "vllm.entrypoints.openai.api_server",
 }
-TARGETS = {CORE, ENGINE, STATS, *APPS}
+TARGETS = {
+    CORE,
+    ENGINE,
+    STATS,
+    INPUT_PROCESSOR,
+    SCHEDULER,
+    SERVING_CHAT,
+    SERVING_COMPLETION,
+    *APPS,
+}
 
 
 class OptionalObserverMiddleware:
@@ -81,6 +94,16 @@ def _instrument(module):
             _instrument_app(module)
         if os.getenv("OBSERVER_ENGINE_ENABLED", "1") != "1":
             return
+        from . import stages
+
+        if module.__name__ in (SERVING_CHAT, SERVING_COMPLETION):
+            stages.install_serving(module)
+        if module.__name__ == INPUT_PROCESSOR:
+            stages.install_input_processor(module)
+        if module.__name__ == SCHEDULER:
+            stages.install_scheduler(module)
+        if module.__name__ == CORE:
+            stages.install_engine_core(module.EngineCore)
         if (
             module.__name__ == CORE
             and os.getenv("OBSERVER_LANGFUSE_ENABLED", "0") == "1"
@@ -100,6 +123,7 @@ def _instrument(module):
             if engine_cls is not None and stats_cls is not None:
                 from .adapter import install as install_adapter
 
+                stages.install_async_llm(engine_cls)
                 install_adapter(engine_cls, stats_cls)
     except Exception:
         logger.warning(

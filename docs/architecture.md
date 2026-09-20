@@ -61,3 +61,5 @@ Langfuse上报真实子span：serve-model-request → generate-response → queu
 队列默认 1024，满后丢弃当前 trace 并计数。OTLP 超时预算 2 秒，失败记录计数；不落盘、不保证投递。正常退出等待最多 5 秒，强制退出可丢数据。HTTP 路径无 Langfuse 网络 IO；stdout 日志同步写出，日志采集端需保持畅通。
 
 通过 [Langfuse 官方 OTLP HTTP 入口](https://langfuse.com/integrations/native/opentelemetry) 导出，独立 provider 不修改应用全局配置。W3C traceparent 保留 trace ID/父 span ID；否则接受非全零的 32 位小写十六进制 x-trace-id，非法值生成新 ID。暂不传播 tracestate/baggage，默认全量采集，不依赖上游 sampled 标记。
+
+导出器为每个根/子节点设置 `langfuse.observation.metadata.traceId`，使 Langfuse 节点详情的 Metadata 显式展示请求 ID。该字段始终取事件的 `trace_id`，与 OTLP 原生 trace ID 一致，节点自定义 metadata 不能覆盖它。控制台汇总字段继续使用 `trace_id`，HTTP 响应头使用 `x-trace-id`；observation ID 标识单个节点。该展示字段只随新 trace 上报，历史记录不回填。

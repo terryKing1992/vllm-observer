@@ -1,0 +1,11 @@
+# Only observer deployment inputs enter the build context.
+**
+!pyproject.toml
+!src/
+!src/**
+!bootstrap/
+!bootstrap/sitecustomize.py
+!deploy/
+!deploy/Dockerfile
+**/__pycache__/
+**/*.egg-info/

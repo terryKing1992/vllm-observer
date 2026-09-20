@@ -75,7 +75,18 @@ class MetricsFilter:
         self.duration.labels(*self.labels).observe(
             event["stages"]["http_total"]["total_seconds"]
         )
-        for name in ("queue", "prefill", "decode", "http_total", "http_first_body"):
+        for name in (
+            "queue",
+            "prefill",
+            "decode",
+            "http_total",
+            "http_first_body",
+            "render_input",
+            "input_process",
+            "submit_engine",
+            "schedule_total",
+            "execute_model",
+        ):
             if name in event["stages"]:
                 value = event["stages"][name]
                 self.stage_seconds.labels(*self.labels, name).inc(

@@ -144,6 +144,30 @@ print(json.dumps([hasattr(EngineCore.step, '_observer_clock'),
     assert json.loads(output.stdout) == [False, False, 0]
 
 
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_child_process_inherits_pythonpath_instrumentation(tmp_path, enabled):
+    make_fake_vllm(tmp_path)
+    child_code = """
+import json
+from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.entrypoints.launchers.app import build_app
+print(json.dumps([hasattr(EngineCore.step, '_observer_clock'),
+                  hasattr(AsyncLLM.generate, '_observer'),
+                  len(build_app().user_middleware)]))
+"""
+    # The child inherits the launch environment; neither process calls install().
+    output = run_python(
+        "import subprocess, sys; "
+        f"subprocess.run([sys.executable, '-c', {child_code!r}], check=True)",
+        enabled=enabled,
+        extra_path=tmp_path,
+        OBSERVER_LANGFUSE_ENABLED="1",
+    )
+    active = enabled == "1"
+    assert json.loads(output.stdout) == [active, active, int(active)]
+
+
 def test_incompatible_engine_still_imports(tmp_path):
     make_fake_vllm(tmp_path)
     (tmp_path / "vllm/v1/engine/core.py").write_text(

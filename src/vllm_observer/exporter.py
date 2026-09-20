@@ -176,6 +176,11 @@ class LangfuseSink:
                         )
                 for key, value in node.get("metadata", {}).items():
                     span.set_attribute("langfuse.observation.metadata." + key, value)
+                # Expose the native trace ID in every node's Langfuse details.
+                # Set it last so custom metadata cannot override the identity.
+                span.set_attribute(
+                    "langfuse.observation.metadata.traceId", event["trace_id"]
+                )
                 if node["type"] == "generation":
                     span.set_attribute(
                         "langfuse.observation.model.name", event.get("model", "unknown")

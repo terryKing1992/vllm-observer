@@ -4,14 +4,13 @@ vLLM / vLLM-Ascend 请求日志、阶段耗时、实例主动上报和异步 Lan
 
 **模型实例直接向 Prometheus Remote Write 接口 POST 指标。Prometheus 不抓取实例，不需要实例地址清单，也不需要反向访问模型端口。**
 
+已有 Docker 环境需要运行真实模型：见 [手工部署模型与打点指南](docs/manual-deployment.md)，逐步使用 `docker build` / `docker run` 启动Qwen小模型、注入sitecustomize并验证真实Langfuse上报。提供CPU与GPU参数；当前本机GPU方案需先更新NVIDIA驱动。
+
+模型直接以 `vllm serve` 启动：环境变量 `PYTHONPATH` 包含本工程bootstrap目录，`OBSERVER_ENABLED=1` 开启可选打点。Docker镜像也使用原生命令入口，不经过额外Python启动包装脚本。
+
 ## Windows 演示
 
-先启动接收端（Docker Desktop 已启动）：
-
-```powershell
-$env:GRAFANA_ADMIN_PASSWORD='replace-with-your-password'
-docker compose -f deploy/compose.yaml up -d
-```
+先按 [Prometheus本地Docker部署教程](docs/prometheus-docker.md)启动并验证接收端，再按 [手工部署指南](docs/manual-deployment.md)第6步启动Grafana看板。
 
 安装并启动模拟实例：
 
@@ -21,13 +20,13 @@ python -m venv .venv
 $env:OBSERVER_SERVICE='demo'
 $env:OBSERVER_MODEL='demo-model'
 $env:OBSERVER_INSTANCE_ID='demo-1'
-$env:OBSERVER_REMOTE_WRITE_URL='http://localhost:9090/api/v1/write'
+$env:OBSERVER_REMOTE_WRITE_URL='http://localhost:19090/api/v1/write'
 .venv/Scripts/python -m uvicorn vllm_observer.demo:app --port 8000
 ```
 
 另一个终端用相同 service/model，改 instance ID 为 demo-2、端口为 8001，启动第二个副本。**无需修改 Prometheus 配置**。即使没有请求，实例也每 10 秒主动上报心跳。
 
-Grafana：`http://localhost:3001`（避免与本地 Langfuse 的 3000 端口冲突），admin / 自设密码，打开 **vLLM Observer · 主动上报**。Prometheus：`http://localhost:9090`。正常退出发送 alive=0；强制结束或断网后，超过 30 秒无新心跳不再计为在线。在线表示近期上报，无法仅凭断流区分实例崩溃和网络中断。
+Grafana：`http://localhost:13001`，admin / 自设密码，打开 **vLLM Observer · 主动上报**。Prometheus：`http://localhost:19090`。端口避开本机已有服务。正常退出发送 alive=0；强制结束或断网后，超过 30 秒无新心跳不再计为在线。在线表示近期上报，无法仅凭断流区分实例崩溃和网络中断。
 
 发送模拟请求：
 
@@ -72,12 +71,16 @@ serve-model-request (SPAN)
    └─ decode (SPAN，聚合重复生成阶段)
 ```
 
-已有本地服务可设置 LANGFUSE_BASE_URL=http://localhost:3000。在进程环境中配置密钥后执行 `.venv/Scripts/python scripts/verify_langfuse.py`：发送模拟请求，再通过官方 langfuse-cli 读取并审计5个节点的类型、父子关系、时间包含关系、模型和token。需要 Node.js/npx；脚本不保存密钥。加 `--trace-id <ID>` 可只读审计已有demo trace。实际结果见验证记录。
+打开一条 trace，点击任意火焰图节点，在详情的 **Metadata → traceId** 查看完整请求 ID。根节点、generation 和各阶段都会显式携带它，与 Langfuse 原生 Trace ID、响应头 `x-trace-id`、请求汇总日志的 `trace_id` 一致。节点自己的 observation ID 用于标识该节点。更新后需重启服务并发送新请求，历史记录不会自动补充此字段。
+
+已有本地服务可设置 LANGFUSE_BASE_URL=http://localhost:3000。在进程环境中配置密钥后执行 `.venv/Scripts/python scripts/verify_langfuse.py`：发送模拟请求，再通过官方 langfuse-cli 读取并审计5个节点的类型、父子关系、时间包含关系、模型和token，以及请求头、响应头、日志、所有节点原生 ID 与 metadata.traceId 的一致性。需要 Node.js/npx；脚本不保存密钥。加 `--trace-id <ID>` 可只读审计更新后生成的demo trace。实际结果见验证记录。
 
 ## 文档与验证
 
 - [架构与时间语义](docs/architecture.md)
 - [主动上报部署、参数和排障](docs/deployment.md)
+- [Prometheus本地Docker部署教程](docs/prometheus-docker.md)
+- [手工部署模型与打点](docs/manual-deployment.md)
 - [开发与过滤器扩展](docs/development.md)
 - [验证记录](docs/validation.md)
 

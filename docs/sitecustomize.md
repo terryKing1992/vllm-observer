@@ -17,6 +17,8 @@ vllm serve /path/to/model # 保留原有模型、TP等参数
 
 只启用日志/指标时不设置 Langfuse 开关；开启 Langfuse 时引擎时钟校准 hook 同时生效。API 与 EngineCore 的所有 Python 子进程都必须继承上述环境，并能访问 bootstrap 与已安装包。
 
+模型启动命令直接使用 `vllm serve`。Dockerfile同样使用 `ENTRYPOINT ["vllm", "serve"]`，运行时传入 `-e PYTHONPATH=/opt/vllm-observer/bootstrap -e OBSERVER_ENABLED=1`。无需Python启动包装脚本；环境变量应在启动vLLM前设置。容器已有PYTHONPATH时保留原路径并用Linux冒号拼接，具体操作见 [手工部署指南](manual-deployment.md)。
+
 ## Windows
 
 在 vllm-observer 目录：

@@ -2,6 +2,8 @@
 
 ## 数据流
 
+本地接收端的完整安装、持久化与验收步骤见 [Prometheus Docker部署教程](prometheus-docker.md)，使用手工docker run。
+
 模型实例后台任务 → HTTP POST /api/v1/write → Prometheus → Grafana。采用 protobuf + Snappy Remote Write 1.0，无 Pushgateway、无实例抓取、无 file/Kubernetes SD。部署配置 scrape_configs 为空；Prometheus 需开启 --web.enable-remote-write-receiver。
 
 每个实例启动即自动上报身份和心跳，不需要预先维护数量。无法统计从未成功上报过的实例；若需要“期望副本数”，应另接部署平台的期望状态。
@@ -26,6 +28,7 @@
 | LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY | 无 | 开启时必填 |
 | GRAFANA_ADMIN_PASSWORD | 无 | Compose 必填 |
 | GRAFANA_PORT | 3001 | Grafana 本机端口，避开 Langfuse 3000 |
+| PROMETHEUS_PORT | 9090 | Prometheus 宿主机端口；Docker 模型示例设为19090以避开已有MinIO |
 
 Kubernetes 通过 Downward API 注入 metadata.uid 为 instance ID，配置可出站访问的 Remote Write URL。无需给监控系统开通模型入站端口。单 API 进程；共享端口的多 worker 仍需独立汇总方案。同一时序只能有一个活动写入者，避免重复 ID 造成乱序/覆盖。
 
@@ -53,6 +56,6 @@ Kubernetes 通过 Downward API 注入 metadata.uid 为 instance ID，配置可�
 
 404：检查 receiver 开关和完整 /api/v1/write 路径。401/403：检查网关凭证。400：检查服务器日志、重复 instance ID 或机器时钟。无心跳：确认 ASGI lifespan 开启及 PUSH_ENABLED=1。无引擎阶段：确认 V1 AsyncLLM、stats 未关闭；取消/失败请求可能没有完成统计。
 
-源码基线：vLLM b3124a8237f21fcd3a4510002a5e2925b0dbedfe，Ascend c04c5db026e5cb39ef843c72496384eb37789775。当前源码可位于本工程子模块或工作区相邻目录，AST测试兼容两种布局。不代表硬件兼容认证；升级须重验。Windows 是模拟/观察器环境，实际 NPU 推理在 Linux 验证。
+源码基线：vLLM b3124a8237f21fcd3a4510002a5e2925b0dbedfe，Ascend c04c5db026e5cb39ef843c72496384eb37789775。当前源码可位于本工程子模块或工作区相邻目录，AST测试兼容两种布局。不代表硬件兼容认证；升级须重验。Windows 原生用于模拟/观察器开发；Docker Desktop 的 Linux 容器可按 [Docker 模型指南](docker-model.md)部署 GPU/CPU 模型，实际 NPU 推理仍在昇腾 Linux 环境验证。
 
 协议参考：[Remote Write 1.0](https://prometheus.io/docs/specs/prw/remote_write_spec/)，[Prometheus 接收端开关](https://prometheus.io/docs/prometheus/latest/storage/)。

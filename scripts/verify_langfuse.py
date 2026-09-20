@@ -1,21 +1,24 @@
-"""Send one demo trace and audit its timeline through the official Langfuse CLI.
+"""Send a demo or real model request and audit it via the official Langfuse CLI.
 
-Credentials are read only from LANGFUSE_* environment variables. Use --trace-id
-to re-audit an existing demo trace without creating another request.
+Credentials are read only from LANGFUSE_* environment variables. Use --server-url
+and --model for a deployed model, or --trace-id to audit an existing request.
 """
 
 import argparse
 import asyncio
+import io
 import json
+import logging
 import os
 import shutil
 import subprocess
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 
 
-def audit_observations(rows, identifier):
+def audit_observations(rows, identifier, model="demo-model"):
     expected = {
         "serve-model-request",
         "generate-response",
@@ -29,12 +32,17 @@ def audit_observations(rows, identifier):
     assert root["type"] == "SPAN" and not root.get("parentObservationId")
     assert generation["type"] == "GENERATION"
     assert generation["parentObservationId"] == root["id"]
-    assert generation["model"] == "demo-model"
-    assert generation["usageDetails"]["input"] == 8
-    assert generation["usageDetails"]["output"] == 4
+    assert generation["model"] == model
+    usage = generation["usageDetails"]
+    assert usage["input"] > 0 and usage["output"] > 0
+    if model == "demo-model":
+        assert usage["input"] == 8 and usage["output"] == 4
     by_id = {row["id"]: row for row in rows}
     for row in rows:
         assert row["traceId"] == identifier
+        assert row["metadata"]["traceId"] == identifier, (
+            f"{row['name']}: node details traceId differs from native trace ID"
+        )
         start = datetime.fromisoformat(row["startTime"].replace("Z", "+00:00"))
         end = datetime.fromisoformat(row["endTime"].replace("Z", "+00:00"))
         assert end >= start
@@ -51,21 +59,45 @@ def audit_observations(rows, identifier):
         assert nodes[name]["type"] == "SPAN"
         assert nodes[name]["parentObservationId"] == generation["id"]
     decode = nodes["decode"]["metadata"]
-    assert int(decode["count"]) == 3
-    assert (
-        abs(float(decode["total_seconds"]) / 3 - float(decode["mean_seconds"])) < 1e-8
-    )
+    count = max(0, usage["output"] - 1)
+    assert int(decode["count"]) == count
+    mean = float(decode["total_seconds"]) / count if count else 0
+    assert abs(mean - float(decode["mean_seconds"])) < 1e-8
     return nodes
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trace-id", help="Audit an existing demo trace only")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--trace-id", help="Audit an existing trace only")
+    source.add_argument("--server-url", help="Send a request to a real model server")
+    parser.add_argument("--model", default="demo-model", help="Served model name")
     args = parser.parse_args()
     base = os.environ["LANGFUSE_BASE_URL"].rstrip("/")
     os.environ["LANGFUSE_HOST"] = base
     identifier = args.trace_id or uuid.uuid4().hex
-    if not args.trace_id:
+    if args.server_url:
+        payload = json.dumps(
+            {
+                "model": args.model,
+                "messages": [{"role": "user", "content": "Count from one to ten."}],
+                "max_tokens": 16,
+                "ignore_eos": True,
+                "stream": True,
+            }
+        ).encode()
+        request = urllib.request.Request(
+            args.server_url.rstrip("/") + "/v1/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json", "x-trace-id": identifier},
+        )
+        with urllib.request.urlopen(request, timeout=180) as response:
+            assert response.headers["x-trace-id"] == identifier
+            assert b"[DONE]" in response.read()
+        print(json.dumps({"request": "completed", "trace_id": identifier}), flush=True)
+    elif not args.trace_id:
+        if args.model != "demo-model":
+            parser.error("Use --server-url or --trace-id for a non-demo model")
         os.environ.update(
             OBSERVER_PUSH_ENABLED="0",
             OBSERVER_LANGFUSE_ENABLED="1",
@@ -76,6 +108,10 @@ def main():
         )
         from vllm_observer.demo import app
 
+        console_log = io.StringIO()
+        log_handler = logging.StreamHandler(console_log)
+        observer_logger = logging.getLogger("vllm_observer")
+        observer_logger.addHandler(log_handler)
         messages = []
 
         async def request():
@@ -99,9 +135,17 @@ def main():
             asyncio.run(request())
             assert messages[-1]["body"] == b"data: [DONE]\n\n"
             assert (b"x-trace-id", identifier.encode()) in messages[0]["headers"]
+            events = [
+                json.loads(line)
+                for line in console_log.getvalue().splitlines()
+                if line.startswith("{")
+            ]
+            assert len(events) == 1 and events[0]["trace_id"] == identifier
             assert app.exporter.close(timeout=10), "Export worker did not finish"
             assert app.exporter.failed == 0, "Langfuse export failed"
         finally:
+            observer_logger.removeHandler(log_handler)
+            log_handler.close()
             app.exporter.close(timeout=10)
             app.exporter.sink.provider.shutdown()
         print(json.dumps({"export": "accepted", "trace_id": identifier}), flush=True)
@@ -140,7 +184,7 @@ def main():
         body = envelope.get("body", envelope)
         rows = body.get("data", [])
         if len(rows) >= 5:
-            nodes = audit_observations(rows, identifier)
+            nodes = audit_observations(rows, identifier, args.model)
             project = nodes["serve-model-request"]["projectId"]
             print(
                 json.dumps(
@@ -154,6 +198,7 @@ def main():
                                 "id": row["id"],
                                 "parent_id": row.get("parentObservationId"),
                                 "type": row["type"],
+                                "metadata_trace_id": row["metadata"]["traceId"],
                                 "start": row["startTime"],
                                 "end": row["endTime"],
                             }

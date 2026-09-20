@@ -8,6 +8,7 @@ import math
 
 from .core import current_request
 from .engine_clock import CLOCK_ERROR, CLOCK_MONO, CLOCK_UNIX
+from .stages import STAGES_HEADER, record_engine_stages
 
 logger = logging.getLogger("vllm_observer")
 
@@ -128,6 +129,7 @@ def install(engine_cls=None, stats_cls=None):
                     "req_stats"
                 )
                 record_timeline(trace, generation, stat, raw)
+                record_engine_stages(trace, generation, raw)
         except Exception:
             logger.exception("Observer could not collect request statistics")
         return result
@@ -147,15 +149,21 @@ def install(engine_cls=None, stats_cls=None):
                 if (
                     output.finished
                     and output.trace_headers
-                    and CLOCK_MONO in output.trace_headers
+                    and (
+                        CLOCK_MONO in output.trace_headers
+                        or STAGES_HEADER in output.trace_headers
+                    )
                 ):
                     raw = output_signature.bind(self, *args, **kwargs).arguments[
                         "req_stats"
                     ]
-                    raw._observer_clock = {
-                        key: output.trace_headers[key]
-                        for key in (CLOCK_MONO, CLOCK_UNIX, CLOCK_ERROR)
-                    }
+                    if CLOCK_MONO in output.trace_headers:
+                        raw._observer_clock = {
+                            key: output.trace_headers[key]
+                            for key in (CLOCK_MONO, CLOCK_UNIX, CLOCK_ERROR)
+                        }
+                    if STAGES_HEADER in output.trace_headers:
+                        raw._observer_stages = output.trace_headers[STAGES_HEADER]
             except Exception:
                 logger.exception("Observer could not read engine clock")
             return result

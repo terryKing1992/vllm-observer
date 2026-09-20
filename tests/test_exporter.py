@@ -29,6 +29,7 @@ def test_real_otlp_serialization_preserves_trace_and_aggregates(monkeypatch):
     generation["start_ns"] = event.started_ns + 1_000_000
     generation["end_ns"] = event.started_ns + 800_000_000
     generation["usage"] = {"input": 8, "output": 4}
+    generation["metadata"]["traceId"] = "must-not-override-native-id"
     for name, start_ms, end_ms in (
         ("queue", 10, 40),
         ("prefill", 40, 100),
@@ -53,6 +54,13 @@ def test_real_otlp_serialization_preserves_trace_and_aggregates(monkeypatch):
     assert headers["x-langfuse-ingestion-version"] == "4"
     spans = {span.name: span for span in payload.resource_spans[0].scope_spans[0].spans}
     assert len(spans) == 5
+    for node in spans.values():
+        assert node.trace_id.hex() == event.trace_id
+        node_attrs = {attr.key: attr.value for attr in node.attributes}
+        assert (
+            node_attrs["langfuse.observation.metadata.traceId"].string_value
+            == event.trace_id
+        )
     span = spans["serve-model-request"]
     assert span.trace_id.hex() == "a" * 32
     assert span.parent_span_id.hex() == "b" * 16
@@ -98,4 +106,5 @@ def test_export_failure_is_counted_and_root_has_no_fake_parent(monkeypatch):
     assert exporter.failed == 1
     assert captured[0].parent is None
     assert captured[0].context.trace_id == int("c" * 32, 16)
+    assert captured[0].attributes["langfuse.observation.metadata.traceId"] == "c" * 32
     sink.provider.shutdown()
