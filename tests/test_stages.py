@@ -34,6 +34,9 @@ class FakeInputProcessorModule:
 
 
 class FakeEngine:
+    async def add_request(self, request):
+        return "submitted"
+
     async def _add_request(self, request, prompt, parent_req, index, queue):
         return "submitted"
 
@@ -58,6 +61,7 @@ def test_frontend_stages_record_wall_time(monkeypatch):
             processor.process_inputs("request", "prompt", "params").request_id
             == "request"
         )
+        assert await FakeEngine().add_request("request") == "submitted"
         assert (
             await FakeEngine()._add_request("request", "prompt", None, 0, "queue")
             == "submitted"
@@ -67,10 +71,19 @@ def test_frontend_stages_record_wall_time(monkeypatch):
         asyncio.run(run())
     finally:
         current_request.reset(token)
-    assert set(trace.stages) == {"render_input", "input_process", "submit_engine"}
+    assert set(trace.stages) == {
+        "render_input",
+        "input_process",
+        "submit_engine",
+        "output_processor_add",
+    }
     for stage in trace.stages.values():
         assert stage.count == 1
         assert stage.total_seconds >= 0.0
+    assert {node["name"] for node in trace.api_intervals} == set(trace.stages)
+    for node in trace.api_intervals:
+        assert node["start_ns"] <= node["end_ns"]
+        assert node["metadata"]["timing_source"] == "wall_measured"
 
 
 class FakeSchedulerModule:
@@ -82,7 +95,10 @@ class FakeSchedulerModule:
             self.requests[request.request_id] = request
 
         def schedule(self, throttle_prefills=False):
-            return SimpleNamespace(num_scheduled_tokens={"request-a": 3})
+            scheduled = (
+                10 if not self.requests.get("request-a").num_computed_tokens else 1
+            )
+            return SimpleNamespace(num_scheduled_tokens={"request-a": scheduled})
 
 
 def test_scheduler_wraps_count_prefill_and_decode_steps():
@@ -108,7 +124,15 @@ def test_scheduler_wraps_count_prefill_and_decode_steps():
 
 
 class FakeFuture:
+    def __init__(self):
+        self.callbacks = []
+
+    def add_done_callback(self, callback):
+        self.callbacks.append(callback)
+
     def result(self):
+        for callback in self.callbacks:
+            callback(self)
         return "model-output"
 
 
@@ -205,6 +229,5 @@ def test_record_engine_stages_tolerates_missing_clock(monkeypatch):
     )
     assert "schedule_total" in trace.stages
     assert (
-        generation["metadata"]["waiting_unavailable"]
-        == "missing_clock_or_timestamps"
+        generation["metadata"]["waiting_unavailable"] == "missing_clock_or_timestamps"
     )

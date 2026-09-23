@@ -21,6 +21,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import time
 
 from .core import current_request
@@ -43,6 +44,15 @@ def _new_record() -> dict:
         "schedule_seconds": 0.0,
         "execute_seconds": 0.0,
         "execute_steps": 0,
+        # Degraded contention tracking: engine steps that ran while this
+        # request was mid-prefill but did not schedule it (other requests'
+        # work interleaved between its prefill chunks).
+        "contention_steps": 0,
+        "contention_seconds": 0.0,
+        "prefill_done": False,
+        # (monotonic_start, monotonic_end) pairs, bounded to avoid unbounded
+        # memory for very long decode sequences.
+        "execute_intervals": [],
     }
 
 
@@ -72,7 +82,9 @@ def _timed_async(method, stage, contract):
         try:
             return await method(self, *args, **kwargs)
         finally:
-            trace.add(stage, time.perf_counter() - started)
+            ended = time.perf_counter()
+            trace.add(stage, ended - started)
+            trace.api_interval(stage, started, ended, module=method.__module__)
 
     observed._observer_stages = True
     return observed
@@ -92,7 +104,9 @@ def _timed_sync(method, stage, contract):
         try:
             return method(self, *args, **kwargs)
         finally:
-            trace.add(stage, time.perf_counter() - started)
+            ended = time.perf_counter()
+            trace.add(stage, ended - started)
+            trace.api_interval(stage, started, ended, module=method.__module__)
 
     observed._observer_stages = True
     return observed
@@ -130,8 +144,40 @@ def install_input_processor(module):
     )
 
 
+def install_protocol(module):
+    """Wrap protocol.to_sampling_params (sampling parameter construction)."""
+    installed = []
+    for cls_name in ("ChatCompletionRequest", "CompletionRequest"):
+        cls = getattr(module, cls_name, None)
+        method = getattr(cls, "to_sampling_params", None) if cls else None
+        if method is None:
+            continue
+        if getattr(method, "_observer_stages", False):
+            installed.append(method)
+            continue
+        wrapped = _timed_sync(method, "sampling_params", ("self",))
+        setattr(cls, "to_sampling_params", wrapped)
+        installed.append(wrapped)
+    if not installed:
+        raise RuntimeError(f"No sampling params hook found in {module.__name__}")
+
+
 def install_async_llm(engine_cls):
-    """Wrap AsyncLLM._add_request (output registration + engine submission)."""
+    """Wrap AsyncLLM.add_request and _add_request (engine submission stages)."""
+    # ``generate`` is an async generator spanning the whole request lifetime;
+    # the submission boundary is the public ``add_request`` instead.
+    add_request = getattr(engine_cls, "add_request", None)
+    if (
+        add_request is not None
+        and inspect.iscoroutinefunction(add_request)
+        and not getattr(add_request, "_observer_stages", False)
+    ):
+        try:
+            engine_cls.add_request = _timed_async(
+                add_request, "submit_engine", ("self",)
+            )
+        except RuntimeError:
+            logger.warning("AsyncLLM.add_request contract changed; stage skipped")
     method = getattr(engine_cls, "_add_request", None)
     if method is None:
         logger.warning(
@@ -140,7 +186,7 @@ def install_async_llm(engine_cls):
         return
     if getattr(method, "_observer_stages", False):
         return
-    engine_cls._add_request = _timed_async(method, "submit_engine", ("request",))
+    engine_cls._add_request = _timed_async(method, "output_processor_add", ("request",))
 
 
 # ---------------------------------------------------------------------------
@@ -183,15 +229,29 @@ def install_scheduler(module):
                     record["first_schedule"] = now
                 record["schedule_steps"] += 1
                 record["schedule_seconds"] += duration
-                request = (getattr(self, "requests", None) or {}).get(request_id)
-                if request is not None and getattr(
-                    request, "num_computed_tokens", 1
-                ) < getattr(request, "num_prompt_tokens", 0):
+                scheduled = (getattr(output, "num_scheduled_tokens", {}) or {}).get(
+                    request_id, 0
+                )
+                if scheduled > 1:
                     record["prefill_chunks"] += 1
                 else:
                     record["decode_steps"] += 1
+                    record["prefill_done"] = True
         except Exception:
             logger.exception("Observer could not collect scheduler stage")
+        try:
+            scheduled_ids = set(getattr(output, "num_scheduled_tokens", {}) or {})
+            if scheduled_ids:
+                for request_id, record in _REGISTRY.items():
+                    if (
+                        record["first_schedule"] is not None
+                        and not record["prefill_done"]
+                        and request_id not in scheduled_ids
+                    ):
+                        record["contention_steps"] += 1
+                        record["contention_seconds"] += duration
+        except Exception:
+            logger.exception("Observer could not collect prefill contention")
         return output
 
     observed_add_request._observer_stages = True
@@ -208,16 +268,27 @@ class _TimedFuture:
         self._request_ids = request_ids
 
     def result(self, *args, **kwargs):
-        started = time.perf_counter()
+        started = time.monotonic()
         try:
             return self._inner.result(*args, **kwargs)
         finally:
-            duration = time.perf_counter() - started
+            ended = time.monotonic()
+            duration = ended - started
+            if os.getenv("OBSERVER_DEBUG", "0") == "1":
+                logger.warning(
+                    "observer timed future ids=%s duration=%.6f registry=%d",
+                    self._request_ids,
+                    duration,
+                    len(_REGISTRY),
+                )
             for request_id in self._request_ids:
                 record = _REGISTRY.get(request_id)
                 if record is not None:
                     record["execute_seconds"] += duration
                     record["execute_steps"] += 1
+                    intervals = record["execute_intervals"]
+                    if len(intervals) < 512:
+                        intervals.append((started, ended))
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -231,21 +302,64 @@ def _wrap_executor(executor):
 
         @functools.wraps(execute)
         def timed_execute(scheduler_output, *args, **kwargs):
-            future = execute(scheduler_output, *args, **kwargs)
             try:
                 request_ids = list(
                     getattr(scheduler_output, "num_scheduled_tokens", {}) or {}
                 )
+                if os.getenv("OBSERVER_DEBUG", "0") == "1":
+                    logger.warning(
+                        "observer execute called ids=%s type=%s",
+                        request_ids,
+                        type(scheduler_output).__name__,
+                    )
+                started = time.monotonic()
+                future = execute(scheduler_output, *args, **kwargs)
                 if request_ids and callable(getattr(future, "result", None)):
-                    return _TimedFuture(future, request_ids)
+                    # vLLM >= 0.29 may never call result() on this future in
+                    # its batch-queue path (outputs arrive via sample_tokens).
+                    # A done-callback still captures real GPU completion.
+                    try:
+                        future.add_done_callback(
+                            lambda _f, ids=tuple(request_ids), s=started: (
+                                _record_execute(list(ids), s, time.monotonic())
+                            )
+                        )
+                    except Exception:
+                        logger.exception("Observer could not attach executor callback")
+                    return future
+                ended = time.monotonic()
+                _record_execute(request_ids, started, ended)
+                return future
             except Exception:
-                logger.exception("Observer could not wrap executor future")
-            return future
+                logger.exception("Observer could not wrap executor call")
+                return execute(scheduler_output, *args, **kwargs)
 
         executor.execute_model = timed_execute
         executor._observer_stages = True
+        if os.getenv("OBSERVER_DEBUG", "0") == "1":
+            logger.warning("observer wrapped %s.execute_model", type(executor).__name__)
     except Exception:
         logger.exception("Observer executor hook unavailable; serving continues")
+
+
+def _record_execute(request_ids, started, ended):
+    if os.getenv("OBSERVER_DEBUG", "0") == "1":
+        logger.warning(
+            "observer execute recorded ids=%s duration=%.6f registry=%d",
+            request_ids,
+            ended - started,
+            len(_REGISTRY),
+        )
+    duration = ended - started
+    for request_id in request_ids:
+        record = _REGISTRY.get(request_id)
+        if record is None:
+            continue
+        record["execute_seconds"] += duration
+        record["execute_steps"] += 1
+        intervals = record["execute_intervals"]
+        if len(intervals) < 512:
+            intervals.append((started, ended))
 
 
 def _finished_outputs(batches):
@@ -314,6 +428,8 @@ def record_engine_stages(trace, generation, raw):
     metadata["schedule_steps"] = stages.get("schedule_steps", 0)
     metadata["prefill_chunks"] = stages.get("prefill_chunks", 0)
     metadata["decode_steps"] = stages.get("decode_steps", 0)
+    metadata["contention_steps"] = stages.get("contention_steps", 0)
+    metadata["contention_seconds"] = stages.get("contention_seconds", 0.0)
     trace.add(
         "schedule_total",
         stages.get("schedule_seconds", 0.0),
@@ -352,6 +468,31 @@ def record_engine_stages(trace, generation, raw):
         end_ns,
         timing_source="engine_monotonic_calibrated_to_wall",
         calibration_error_ns=error_ns,
+        module="vllm.v1.core.sched.scheduler",
         prefill_chunks=stages.get("prefill_chunks", 0),
         schedule_steps=stages.get("schedule_steps", 0),
+        contention_steps=stages.get("contention_steps", 0),
+        contention_seconds=stages.get("contention_seconds", 0.0),
     )
+    intervals = stages.get("execute_intervals") or []
+    if intervals and clock:
+        try:
+            mono = float(clock[CLOCK_MONO])
+            wall = int(clock[CLOCK_UNIX])
+            first_start = wall + int((intervals[0][0] - mono) * 1e9)
+            last_end = wall + int((intervals[-1][1] - mono) * 1e9)
+            if generation["start_ns"] <= first_start <= last_end <= trace.now_ns():
+                trace.interval(
+                    generation,
+                    "execute_model",
+                    first_start,
+                    last_end,
+                    timing_source="engine_monotonic_calibrated_to_wall",
+                    calibration_error_ns=error_ns,
+                    module="vllm.v1.executor.uniproc_executor",
+                    aggregate=True,
+                    step_count=stages.get("execute_steps", 0),
+                    captured_steps=len(intervals),
+                )
+        except (KeyError, TypeError, ValueError):
+            metadata["execute_interval_unavailable"] = "invalid_calibration_clock"

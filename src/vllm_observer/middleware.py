@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -12,6 +13,15 @@ logger = logging.getLogger("vllm_observer")
 TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
 TRACE_PARENT = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$")
 PATHS = {"/v1/chat/completions", "/v1/completions", "/v1/responses"}
+CONTENT_LIMIT = 100_000
+
+
+def header_value(headers, name):
+    wanted = name.encode("latin1")
+    for key, value in headers:
+        if key.lower() == wanted:
+            return value.decode("latin1")
+    return None
 
 
 def get_trace_id(headers):
@@ -43,11 +53,21 @@ class ObserverMiddleware:
         if filters is None:
             filters = [self.metrics, ConsoleFilter()]
             if os.getenv("OBSERVER_LANGFUSE_ENABLED", "0") == "1":
-                from .exporter import AsyncExportFilter, LangfuseSink
+                try:
+                    from .exporter import AsyncExportFilter, LangfuseSink
 
-                self.exporter = AsyncExportFilter(LangfuseSink())
-                self.metrics.attach_exporter(self.exporter)
-                filters.append(self.exporter)
+                    self.exporter = AsyncExportFilter(LangfuseSink())
+                    self.metrics.attach_exporter(self.exporter)
+                    filters.append(self.exporter)
+                except Exception:
+                    # Loud, never silent: configured-but-unavailable must be
+                    # visible in logs and in the heartbeat metric.
+                    logger.error(
+                        "OBSERVER_LANGFUSE_ENABLED=1 but Langfuse export is "
+                        "unavailable; traces will NOT be sent to Langfuse",
+                        exc_info=True,
+                    )
+                    self.metrics.mark_langfuse_unavailable()
         self.chain = FilterChain(filters)
 
     async def health_check(self):
@@ -118,6 +138,11 @@ class ObserverMiddleware:
             return await self.app(scope, receive, send)
         trace = RequestTrace(get_trace_id(scope.get("headers", [])))
         trace.route = scope["path"]
+        capture_content = os.getenv("OBSERVER_CAPTURE_CONTENT", "0") == "1"
+        trace.user_id = header_value(scope.get("headers", []), "x-user-id")
+        trace.session_id = header_value(scope.get("headers", []), "x-session-id")
+        request_chunks = []
+        response_chunks = []
         for key, value in scope.get("headers", []):
             if key.lower() == b"traceparent":
                 parent = TRACE_PARENT.fullmatch(value.decode("latin1"))
@@ -129,13 +154,30 @@ class ObserverMiddleware:
         complete = False
 
         async def traced_receive():
+            nonlocal complete
             message = await receive()
+            if capture_content and message["type"] == "http.request":
+                body = message.get("body") or b""
+                if sum(len(c) for c in request_chunks) + len(body) <= CONTENT_LIMIT:
+                    request_chunks.append(body)
             if message["type"] == "http.disconnect":
-                trace.status = "cancelled"
+                # Starlette streaming responses keep polling receive() after
+                # the response body completed; that late disconnect must not
+                # downgrade an already finished successful response.
+                if not complete:
+                    trace.status = "cancelled"
             return message
 
         async def traced_send(message):
             nonlocal first_body, complete
+            if (
+                capture_content
+                and message["type"] == "http.response.body"
+                and message.get("body")
+            ):
+                body = message["body"]
+                if sum(len(c) for c in response_chunks) + len(body) <= CONTENT_LIMIT:
+                    response_chunks.append(body)
             if message["type"] == "http.response.start":
                 if message["status"] >= 400:
                     trace.status = "error"
@@ -149,6 +191,7 @@ class ObserverMiddleware:
             if message["type"] == "http.response.body":
                 if message.get("body") and not first_body:
                     trace.add("http_first_body", time.perf_counter() - trace.started)
+                    trace.first_body_ns = trace.now_ns()
                     first_body = True
                 complete = not message.get("more_body", False)
             await send(message)
@@ -164,8 +207,56 @@ class ObserverMiddleware:
             trace.status = "error"
             raise
         finally:
+            if capture_content:
+                trace.request_payload = _parse_request(
+                    b"".join(request_chunks), trace.route
+                )
+                trace.response_text = _parse_response(b"".join(response_chunks))
             current_request.reset(token)
             self.metrics.inflight.dec()
             event = trace.finish()
             event.update(zip(("service", "model", "instance_id"), self.metrics.labels))
             self.chain.process(event)
+
+
+def _parse_request(raw, route):
+    try:
+        parsed = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception:
+        return {"route": route, "body": raw.decode("utf-8", "replace")}
+    if not isinstance(parsed, dict):
+        return {"route": route, "body": parsed}
+    return {"route": route, **parsed}
+
+
+def _parse_response(raw):
+    if not raw:
+        return None
+    text = raw.decode("utf-8", "replace")
+    if not text.lstrip().startswith("data:"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return text
+        choices = parsed.get("choices") or []
+        if choices:
+            return (choices[0].get("message") or {}).get("content")
+        return parsed.get("content")
+    # OpenAI-compatible SSE: concatenate streamed delta contents.
+    parts = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:") :].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(payload)
+        except Exception:
+            continue
+        choices = chunk.get("choices") or []
+        if choices:
+            content = (choices[0].get("delta") or {}).get("content")
+            if content:
+                parts.append(content)
+    return "".join(parts) or None

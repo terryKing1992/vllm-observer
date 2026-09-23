@@ -7,10 +7,256 @@ import json
 import logging
 import os
 import queue
+import random
 import threading
+import uuid
 from datetime import datetime, timezone
 
 logger = logging.getLogger("vllm_observer")
+
+TIMELINE_MODULE = "vllm-observer.timeline"
+
+
+def langfuse_sample_rate():
+    """Head-sampling rate for normal requests (errors are always kept)."""
+    raw = os.getenv("OBSERVER_LANGFUSE_SAMPLE_RATE", "0.01")
+    try:
+        rate = float(raw)
+    except (TypeError, ValueError):
+        logger.error(
+            "Invalid OBSERVER_LANGFUSE_SAMPLE_RATE %r; falling back to 0.01", raw
+        )
+        return 0.01
+    if not 0.0 <= rate <= 1.0:
+        logger.error(
+            "OBSERVER_LANGFUSE_SAMPLE_RATE %r out of range; falling back to 0.01", raw
+        )
+        return 0.01
+    return rate
+
+
+def tpot_threshold_seconds():
+    """Slow-TPOT threshold in seconds. Config is milliseconds
+    (OBSERVER_TPOT_SLOW_MS, default 100); legacy seconds variable kept
+    as a fallback for existing deployments."""
+    raw = os.getenv("OBSERVER_TPOT_SLOW_MS") or os.getenv(
+        "OBSERVER_TPOT_SLOW_SECONDS", "100"
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.error("Invalid TPOT slow threshold %r; using 100ms", raw)
+        return 0.1
+    if value <= 0:
+        return 0.1
+    legacy_seconds = "OBSERVER_TPOT_SLOW_MS" not in os.environ and raw != "100"
+    return value if legacy_seconds else value * 0.001
+
+
+def to_milliseconds(key, value):
+    """Rename a duration attribute key to milliseconds with converted value.
+
+    Human-facing Langfuse attributes use ms exclusively; Prometheus metrics
+    intentionally stay in seconds (naming convention).
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return key, value
+    if key.endswith("_seconds"):
+        return key[: -len("_seconds")] + "_ms", value * 1000.0
+    if key.endswith("_ns"):
+        return key[: -len("_ns")] + "_ms", value / 1e6
+    return key, value
+
+
+def milliseconds_metadata(metadata):
+    return dict(to_milliseconds(k, v) for k, v in metadata.items())
+
+
+def langfuse_base_url():
+    base = (
+        os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST") or ""
+    ).rstrip("/")
+    if not base:
+        raise ValueError(
+            "Langfuse export enabled but LANGFUSE_BASE_URL/LANGFUSE_HOST is unset"
+        )
+    return base
+
+
+def _segment(node_id, parent_id, name, start_ns, end_ns, **metadata):
+    return {
+        "id": node_id,
+        "parent_id": parent_id,
+        "name": name,
+        "type": "span",
+        "start_ns": start_ns,
+        "end_ns": end_ns,
+        "metadata": {
+            "timing_source": "boundary_partition",
+            "module": TIMELINE_MODULE,
+            **metadata,
+        },
+    }
+
+
+def _timeline_nodes(event, root, generation):
+    """Build a strict MECE timeline.
+
+    Top-level segments share boundaries and therefore always sum to the
+    request total. Overlapping diagnostics (TTFT, execute_model, scheduler
+    totals) stay metadata-only instead of becoming spans.
+    """
+    start, end = root["start_ns"], root["end_ns"]
+    gen_start = generation["start_ns"] if generation else end
+    gen_end = (generation.get("end_ns") or end) if generation else end
+    engine = {
+        node["name"]: node
+        for node in event.get("observations", [])
+        if node["name"] in ("queue", "waiting_to_first_schedule", "prefill", "decode")
+    }
+    waiting = engine.get("waiting_to_first_schedule") or engine.get("queue")
+    prefill = engine.get("prefill")
+    decode = engine.get("decode")
+
+    def clamp(value, lo, hi):
+        return max(lo, min(value, hi))
+
+    api = _segment(
+        uuid.uuid4().hex[:16],
+        root["id"],
+        "api_prepare",
+        start,
+        gen_start,
+        note="routing + render + sampling + submit; details nested",
+    )
+    transfer = _segment(
+        uuid.uuid4().hex[:16],
+        root["id"],
+        "response_transfer",
+        gen_end,
+        end,
+        note="detokenize + SSE flush + response completion",
+    )
+    nodes = [root, api]
+    if transfer["end_ns"] > transfer["start_ns"]:
+        nodes.append(transfer)
+    containers = [api, transfer]
+
+    if generation is not None:
+        generation = dict(generation)
+        generation["parent_id"] = root["id"]
+        nodes.append(generation)
+        w_start = waiting["start_ns"] if waiting else gen_start
+        p_start = prefill["start_ns"] if prefill else w_start
+        d_start = decode["start_ns"] if decode else p_start
+        d_end = decode["end_ns"] if decode else (prefill or {}).get("end_ns", d_start)
+        boundaries = [
+            ("engine_handoff", gen_start, clamp(w_start, gen_start, gen_end)),
+            (
+                "waiting_to_first_schedule",
+                clamp(w_start, gen_start, gen_end),
+                clamp(p_start, gen_start, gen_end),
+            ),
+            (
+                "prefill",
+                clamp(p_start, gen_start, gen_end),
+                clamp(d_start, gen_start, gen_end),
+            ),
+            (
+                "decode",
+                clamp(d_start, gen_start, gen_end),
+                clamp(d_end, gen_start, gen_end),
+            ),
+            (
+                "engine_finalize",
+                clamp(d_end, gen_start, gen_end),
+                gen_end,
+            ),
+        ]
+        seen = [gen_start]
+        generation_segments = []
+        for name, seg_start, seg_end in boundaries:
+            # Never allow a segment to start before the previous boundary.
+            seg_start = max(seg_start, seen[-1])
+            seg_end = max(seg_start, min(seg_end, gen_end))
+            seen.append(seg_end)
+            if seg_end <= seg_start:
+                continue
+            extra = {}
+            if name == "waiting_to_first_schedule" and waiting:
+                extra = dict(waiting.get("metadata", {}))
+                extra.pop("timing_source", None)
+                queue_meta = (engine.get("queue") or {}).get("metadata", {})
+                if "total_seconds" in queue_meta:
+                    extra["queue_total_seconds"] = queue_meta["total_seconds"]
+            if name == "prefill" and prefill:
+                extra = {
+                    k: v
+                    for k, v in prefill.get("metadata", {}).items()
+                    if k != "timing_source"
+                }
+            if name == "decode" and decode:
+                extra = {
+                    k: v
+                    for k, v in decode.get("metadata", {}).items()
+                    if k != "timing_source"
+                }
+            segment = _segment(
+                uuid.uuid4().hex[:16],
+                generation["id"],
+                name,
+                seg_start,
+                seg_end,
+                **extra,
+            )
+            generation_segments.append(segment)
+            nodes.append(segment)
+        containers.extend(generation_segments)
+
+    # API detail intervals nest inside whichever timeline segment contains
+    # them and are clipped to that segment, preserving the partition.
+    assigned = {}
+    for node in event.get("api_intervals", []):
+        detail = dict(node)
+        midpoint = (detail["start_ns"] + detail["end_ns"]) // 2
+        container = next(
+            (
+                segment
+                for segment in containers
+                if segment["start_ns"] <= midpoint < segment["end_ns"]
+            ),
+            None,
+        )
+        if container is None:
+            continue
+        detail["start_ns"] = max(detail["start_ns"], container["start_ns"])
+        detail["end_ns"] = min(detail["end_ns"], container["end_ns"])
+        if detail["end_ns"] <= detail["start_ns"]:
+            continue
+        detail["parent_id"] = container["id"]
+        assigned[detail["name"]] = detail
+        nodes.append(detail)
+    submit = assigned.get("submit_engine")
+    for node in event.get("api_intervals", []):
+        if node["name"] not in ("input_process", "output_processor_add"):
+            continue
+        detail = assigned.get(node["name"])
+        if detail is None or submit is None:
+            continue
+        if not (
+            submit["start_ns"] <= detail["start_ns"]
+            and detail["end_ns"] <= submit["end_ns"]
+        ):
+            continue
+        detail["parent_id"] = submit["id"]
+    # Parents must be created before children for OTel context setup.
+    # Parents must be created before children for OTel context setup;
+    # on equal start timestamps the enclosing (longer) segment comes first.
+    nodes[1:] = sorted(
+        nodes[1:],
+        key=lambda node: (node["start_ns"], -(node["end_ns"] - node["start_ns"])),
+    )
+    return nodes
 
 
 class AsyncExportFilter:
@@ -92,7 +338,7 @@ class LangfuseSink:
             def shutdown(self):
                 self.exporter.shutdown()
 
-        base = os.environ["LANGFUSE_BASE_URL"].rstrip("/")
+        base = langfuse_base_url()
         auth = base64.b64encode(
             f"{os.environ['LANGFUSE_PUBLIC_KEY']}:{os.environ['LANGFUSE_SECRET_KEY']}".encode()
         ).decode()
@@ -115,6 +361,15 @@ class LangfuseSink:
         self.tracer = self.provider.get_tracer("vllm-observer")
 
     def __call__(self, event):
+        # Head sampling: errors are always kept; normal requests are sampled.
+        # The decision never affects Prometheus metrics (separate filter), so
+        # monitoring stays unbiased; Langfuse is single-request drill-down only.
+        if event["status"] == "ok":
+            if random.random() >= langfuse_sample_rate():
+                return
+            sampled = "normal"
+        else:
+            sampled = "error"
         from opentelemetry import trace
         from opentelemetry.context import Context
         from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
@@ -141,7 +396,44 @@ class LangfuseSink:
             "end_ns": end,
             "metadata": {"route": event.get("route", "unknown")},
         }
-        nodes = [root, *event.get("observations", [])]
+        generation = next(
+            (
+                node
+                for node in event.get("observations", [])
+                if node["type"] == "generation"
+            ),
+            None,
+        )
+        nodes = _timeline_nodes(event, root, generation)
+        # Timestamp validation: drop nodes with non-positive duration instead
+        # of sending invalid spans; report via log so it stays observable.
+        valid_nodes = []
+        invalid_nodes = 0
+        for node in nodes:
+            if (node.get("end_ns") or end) > node["start_ns"]:
+                valid_nodes.append(node)
+            else:
+                invalid_nodes += 1
+        if invalid_nodes:
+            logger.warning(
+                "Langfuse timeline dropped %d invalid node(s) for trace %s",
+                invalid_nodes,
+                event["trace_id"],
+            )
+        nodes = valid_nodes
+        # Carry the engine clock calibration residual as an explicit error
+        # boundary on the trace so waterfall readers know its confidence.
+        clock_residual_ns = max(
+            (
+                int(value)
+                for node in event.get("observations", [])
+                for value in [node.get("metadata", {}).get("calibration_error_ns")]
+                if value is not None
+            ),
+            default=0,
+        )
+        request_payload = event.get("request_payload")
+        response_text = event.get("response_text")
         contexts = {None: context}
         completed = []
         opened = []
@@ -174,7 +466,9 @@ class LangfuseSink:
                         span.set_attribute(
                             "langfuse.observation.metadata." + name, event[name]
                         )
-                for key, value in node.get("metadata", {}).items():
+                for key, value in milliseconds_metadata(
+                    node.get("metadata", {})
+                ).items():
                     span.set_attribute("langfuse.observation.metadata." + key, value)
                 # Expose the native trace ID in every node's Langfuse details.
                 # Set it last so custom metadata cannot override the identity.
@@ -185,6 +479,16 @@ class LangfuseSink:
                     span.set_attribute(
                         "langfuse.observation.model.name", event.get("model", "unknown")
                     )
+                    span.set_attribute(
+                        "gen_ai.request.model", event.get("model", "unknown")
+                    )
+                    usage = node.get("usage") or {}
+                    if "input" in usage:
+                        span.set_attribute("gen_ai.usage.prompt_tokens", usage["input"])
+                    if "output" in usage:
+                        span.set_attribute(
+                            "gen_ai.usage.completion_tokens", usage["output"]
+                        )
                     span.set_attribute(
                         "langfuse.observation.usage_details",
                         json.dumps(node.get("usage", {})),
@@ -198,11 +502,10 @@ class LangfuseSink:
                         )
                     span.set_attribute(
                         "langfuse.observation.input",
-                        json.dumps(
-                            {
-                                "input_tokens": node.get("usage", {}).get("input"),
-                                "content_captured": False,
-                            }
+                        json.dumps(request_payload, ensure_ascii=False)
+                        if request_payload is not None
+                        else json.dumps(
+                            {"input_tokens": node.get("usage", {}).get("input")}
                         ),
                     )
                     span.set_attribute(
@@ -210,20 +513,57 @@ class LangfuseSink:
                         json.dumps(
                             {
                                 "output_tokens": node.get("usage", {}).get("output"),
+                                "content": response_text,
                                 "status": status,
-                            }
+                            },
+                            ensure_ascii=False,
                         ),
                     )
+                    if isinstance(request_payload, dict):
+                        parameters = {
+                            key: request_payload.get(key)
+                            for key in (
+                                "temperature",
+                                "top_p",
+                                "top_k",
+                                "max_tokens",
+                                "stream",
+                                "n",
+                                "stop",
+                            )
+                            if key in request_payload
+                        }
+                        if parameters:
+                            span.set_attribute(
+                                "langfuse.observation.model.parameters",
+                                json.dumps(parameters),
+                            )
                 if node is root:
+                    if event.get("user_id"):
+                        span.set_attribute("langfuse.user.id", event["user_id"])
+                    if event.get("session_id"):
+                        span.set_attribute("langfuse.session.id", event["session_id"])
+                    span.set_attribute(
+                        "langfuse.trace.tags",
+                        [
+                            value
+                            for value in (
+                                event.get("service"),
+                                event.get("model"),
+                                event.get("instance_id"),
+                            )
+                            if value
+                        ]
+                        + [f"sampled={sampled}"],
+                    )
+                    if clock_residual_ns:
+                        span.set_attribute(
+                            "observer.clock_calibration_error_ms",
+                            clock_residual_ns / 1e6,
+                        )
                     span.set_attribute(
                         "langfuse.observation.input",
-                        json.dumps(
-                            {
-                                "route": event.get("route"),
-                                "model": event.get("model"),
-                                "content_captured": False,
-                            }
-                        ),
+                        json.dumps(request_payload or {}, ensure_ascii=False),
                     )
                     span.set_attribute(
                         "langfuse.observation.output",
@@ -231,12 +571,62 @@ class LangfuseSink:
                             {
                                 "status": status,
                                 "engine_requests": event["engine_requests"],
-                            }
+                                "content": response_text,
+                            },
+                            ensure_ascii=False,
                         ),
                     )
                     for name, aggregate in event["stages"].items():
                         for key, value in aggregate.items():
+                            key, value = to_milliseconds(key, value)
                             span.set_attribute(f"observer.{name}.{key}", value)
+                    if event.get("first_body_ns"):
+                        span.set_attribute(
+                            "observer.ttft_ms",
+                            (event["first_body_ns"] - start) / 1e6,
+                        )
+                    span.set_attribute(
+                        "observer.timeline_partition",
+                        "api_prepare + generate-response + response_transfer = total",
+                    )
+                    decode_agg = event["stages"].get("decode")
+                    if decode_agg and decode_agg.get("count"):
+                        tpot = decode_agg["total_seconds"] / decode_agg["count"]
+                        span.set_attribute("observer.tpot_ms", tpot * 1000.0)
+                        threshold = tpot_threshold_seconds()
+                        if tpot > threshold:
+                            span.set_attribute("observer.slow_tpot", True)
+                            span.set_attribute(
+                                "observer.tpot_threshold_ms", threshold * 1000.0
+                            )
+                            waiting_node = next(
+                                (
+                                    node
+                                    for node in event.get("observations", [])
+                                    if node.get("name")
+                                    in ("waiting_to_first_schedule", "queue")
+                                ),
+                                None,
+                            )
+                            details = {}
+                            if waiting_node is not None:
+                                details["waiting"] = milliseconds_metadata(
+                                    waiting_node.get("metadata", {})
+                                )
+                            for name in (
+                                "queue",
+                                "schedule_total",
+                                "execute_model",
+                                "prefill",
+                            ):
+                                if name in event["stages"]:
+                                    details[name] = milliseconds_metadata(
+                                        event["stages"][name]
+                                    )
+                            span.set_attribute(
+                                "observer.slow_tpot_details",
+                                json.dumps(details, ensure_ascii=False),
+                            )
                 if status != "ok":
                     span.set_status(trace.Status(trace.StatusCode.ERROR, status))
             for span, node_end in reversed(opened):

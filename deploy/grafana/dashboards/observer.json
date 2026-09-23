@@ -161,7 +161,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by(le,service,model,instance_id)(rate(observer_request_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by(le,service,model,instance_id)(rate(observer_request_duration_ms_bucket[5m])))",
           "legendFormat": "{{service}} {{instance_id}} {{stage}}"
         }
       ],
@@ -242,7 +242,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(observer_stage_seconds_total[5m]) / rate(observer_stage_observations_total[5m])",
+          "expr": "rate(observer_stage_ms_total[5m]) / rate(observer_stage_observations_total[5m])",
           "legendFormat": "{{service}} {{instance_id}} {{stage}}"
         }
       ],

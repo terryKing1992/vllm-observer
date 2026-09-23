@@ -21,12 +21,29 @@ from datetime import datetime, timedelta, timezone
 def audit_observations(rows, identifier, model="demo-model"):
     expected = {
         "serve-model-request",
+        "api_prepare",
         "generate-response",
-        "queue",
+        "engine_handoff",
+        "waiting_to_first_schedule",
         "prefill",
         "decode",
+        "engine_finalize",
+        "response_transfer",
     }
-    assert len(rows) == 5 and {row["name"] for row in rows} == expected
+    # Real API-side detail intervals are nested under api_prepare.
+    optional = {
+        "render_input",
+        "sampling_params",
+        "input_process",
+        "submit_engine",
+        "output_processor_add",
+    }
+    names = {row["name"] for row in rows}
+    assert expected <= names and names <= expected | optional
+    # Overlapping diagnostics must stay metadata-only so the top-level
+    # timeline remains a strict partition of the request total.
+    forbidden = {"http_first_body", "execute_model", "schedule_total", "queue"}
+    assert not (names & forbidden), f"non-partition spans exported: {names & forbidden}"
     nodes = {row["name"]: row for row in rows}
     root, generation = nodes["serve-model-request"], nodes["generate-response"]
     assert root["type"] == "SPAN" and not root.get("parentObservationId")
@@ -55,14 +72,40 @@ def audit_observations(rows, identifier, model="demo-model"):
             assert end <= datetime.fromisoformat(
                 parent["endTime"].replace("Z", "+00:00")
             )
-    for name in ("queue", "prefill", "decode"):
+    for name in ("engine_handoff", "waiting_to_first_schedule", "prefill", "decode"):
         assert nodes[name]["type"] == "SPAN"
         assert nodes[name]["parentObservationId"] == generation["id"]
+    # Top-level segments partition the request total exactly.
+    by_id = {row["id"]: row for row in rows}
+    children = {}
+    for row in rows:
+        if row.get("parentObservationId") in by_id:
+            children.setdefault(row["parentObservationId"], []).append(row)
+    for parent_id, kids in children.items():
+        parent = by_id[parent_id]
+        # Only the two partition levels must sum exactly: the root timeline
+        # and the generation timeline. Container segments (api_prepare,
+        # engine_handoff, ...) hold optional details with intentional gaps.
+        if parent["name"] not in ("serve-model-request", "generate-response"):
+            continue
+        p_start = datetime.fromisoformat(parent["startTime"].replace("Z", "+00:00"))
+        p_end = datetime.fromisoformat(parent["endTime"].replace("Z", "+00:00"))
+        total = sum(
+            (
+                datetime.fromisoformat(kid["endTime"].replace("Z", "+00:00"))
+                - datetime.fromisoformat(kid["startTime"].replace("Z", "+00:00"))
+            ).total_seconds()
+            for kid in kids
+        )
+        assert abs(total - (p_end - p_start).total_seconds()) < 1e-6, (
+            f"{parent['name']}: children sum {total}s != parent "
+            f"{(p_end - p_start).total_seconds()}s"
+        )
     decode = nodes["decode"]["metadata"]
     count = max(0, usage["output"] - 1)
     assert int(decode["count"]) == count
-    mean = float(decode["total_seconds"]) / count if count else 0
-    assert abs(mean - float(decode["mean_seconds"])) < 1e-8
+    mean = float(decode["total_ms"]) / count if count else 0
+    assert abs(mean - float(decode["mean_ms"])) < 1e-6
     return nodes
 
 

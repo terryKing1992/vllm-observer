@@ -56,6 +56,7 @@ def record_timeline(trace, generation, stat, raw):
             stamps[i + 1],
             timing_source="engine_monotonic_calibrated_to_wall",
             calibration_error_ns=int(clock[CLOCK_ERROR]),
+            module="vllm.v1.engine.output_processor",
             sequence_index=sequence,
             count=repetitions,
             total_seconds=duration,

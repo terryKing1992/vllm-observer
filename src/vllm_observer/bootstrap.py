@@ -19,6 +19,8 @@ INPUT_PROCESSOR = "vllm.v1.engine.input_processor"
 SCHEDULER = "vllm.v1.core.sched.scheduler"
 SERVING_CHAT = "vllm.entrypoints.openai.chat_completion.serving"
 SERVING_COMPLETION = "vllm.entrypoints.openai.completion.serving"
+PROTOCOL_CHAT = "vllm.entrypoints.openai.chat_completion.protocol"
+PROTOCOL_COMPLETION = "vllm.entrypoints.openai.completion.protocol"
 APPS = {
     "vllm.entrypoints.launchers.app",
     "vllm.entrypoints.openai.api_server",
@@ -31,6 +33,8 @@ TARGETS = {
     SCHEDULER,
     SERVING_CHAT,
     SERVING_COMPLETION,
+    PROTOCOL_CHAT,
+    PROTOCOL_COMPLETION,
     *APPS,
 }
 
@@ -56,6 +60,22 @@ class OptionalObserverMiddleware:
         await self.app(scope, receive, send)
 
 
+class _WrappedASGIApp:
+    """Fallback for applications that were already started by vLLM."""
+
+    _observer_middleware = True
+
+    def __init__(self, app):
+        self._original_app = app
+        self._observer_app = OptionalObserverMiddleware(app)
+
+    async def __call__(self, scope, receive, send):
+        await self._observer_app(scope, receive, send)
+
+    def __getattr__(self, name):
+        return getattr(self._original_app, name)
+
+
 def _instrument_app(module):
     original = getattr(module, "build_app", None)
     if original is None or getattr(original, "_observer_bootstrap", False):
@@ -64,6 +84,13 @@ def _instrument_app(module):
     @functools.wraps(original)
     def build_app(*args, **kwargs):
         app = original(*args, **kwargs)
+        if os.getenv("OBSERVER_DEBUG", "0") == "1":
+            sys.stderr.write("vllm-observer build_app wrapper invoked\n")
+            sys.stderr.write(
+                "vllm-observer configured middlewares: "
+                + repr(app.user_middleware)
+                + "\n"
+            )
         if os.getenv("OBSERVER_HTTP_ENABLED", "1") != "1":
             return app
         try:
@@ -76,8 +103,20 @@ def _instrument_app(module):
                 )
                 for cls in configured
             ):
-                app.add_middleware(OptionalObserverMiddleware)
+                try:
+                    app.add_middleware(OptionalObserverMiddleware)
+                except RuntimeError:
+                    # vLLM >= 0.29 may build an application that has already
+                    # started; Starlette then forbids add_middleware. Wrap the
+                    # ASGI callable instead so the observer stays outermost.
+                    app = _WrappedASGIApp(app)
+                if os.getenv("OBSERVER_DEBUG", "0") == "1":
+                    sys.stderr.write("vllm-observer middleware added\n")
         except Exception:
+            if os.getenv("OBSERVER_DEBUG", "0") == "1":
+                import traceback
+
+                traceback.print_exc(file=sys.stderr)
             logger.warning(
                 "Observer ASGI hook unavailable; serving continues", exc_info=True
             )
@@ -98,10 +137,15 @@ def _instrument(module):
 
         if module.__name__ in (SERVING_CHAT, SERVING_COMPLETION):
             stages.install_serving(module)
+        if module.__name__ in (PROTOCOL_CHAT, PROTOCOL_COMPLETION):
+            stages.install_protocol(module)
         if module.__name__ == INPUT_PROCESSOR:
             stages.install_input_processor(module)
         if module.__name__ == SCHEDULER:
             stages.install_scheduler(module)
+            from . import deadline
+
+            deadline.install(module)
         if module.__name__ == CORE:
             stages.install_engine_core(module.EngineCore)
         if (
