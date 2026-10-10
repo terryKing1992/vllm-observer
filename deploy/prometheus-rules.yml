@@ -1,0 +1,17 @@
+groups:
+  - name: vllm-pd
+    rules:
+      - record: vllm_pd:ttft_seconds:p95
+        expr: histogram_quantile(0.95, sum by (group, le) (rate(vllm:time_to_first_token_seconds_bucket{role="prefill"}[2m])))
+      - record: vllm_pd:tpot_seconds:p95
+        expr: histogram_quantile(0.95, sum by (group, le) (rate(vllm:request_time_per_output_token_seconds_bucket{role="decode"}[2m])))
+      - record: vllm_pd:queue_waiting
+        expr: sum by (group, role) (vllm:num_requests_waiting)
+      - record: vllm_pd:requests_running
+        expr: sum by (group, role) (vllm:num_requests_running)
+      - record: vllm_pd:prompt_tokens_per_sec
+        expr: sum by (group) (rate(vllm:prompt_tokens_total{role="prefill"}[2m]))
+      - record: vllm_pd:gen_tokens_per_sec
+        expr: sum by (group) (rate(vllm:generation_tokens_total{role="decode"}[2m]))
+      - record: vllm_pd:kv_cache_usage
+        expr: max by (group, role, instance) (vllm:kv_cache_usage_perc)

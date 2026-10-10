@@ -16,26 +16,25 @@ from pathlib import Path
 
 def stage_path(name):
     root = "serve-model-request"
+    # Exported names may carry a module prefix (api-server./engine-core.);
+    # strip it so the flame graph frames stay short and stable.
+    stripped = name.split(".", 1)[-1] if "." in name else name
     engine = {
-        "engine_handoff": "generate-response",
-        "waiting_to_first_schedule": "generate-response",
-        "prefill": "generate-response",
-        "decode": "generate-response",
-        "engine_finalize": "generate-response",
+        "engine_handoff",
+        "waiting_to_first_schedule",
+        "prefill",
+        "decode",
+        "engine_finalize",
     }
-    api = {
-        "render_input": "api_prepare",
-        "input_process": "api_prepare",
-        "submit_engine": "api_prepare",
-    }
+    api = {"render_input", "input_process", "submit_engine", "sampling_params"}
     if name == root:
         return [root]
-    if name in ("queue",):
+    if stripped in ("queue",):
         return [root, "generate-response"]
-    if name in engine:
-        return [root, "generate-response", engine[name]]
-    if name in api:
-        return [root, "api_prepare", name]
+    if stripped in engine:
+        return [root, "generate-response", stripped]
+    if stripped in api:
+        return [root, "api_prepare", stripped]
     if name == "http_total":
         return [root, "http_total(unpartitioned-diagnostic)"]
     return [root, name]

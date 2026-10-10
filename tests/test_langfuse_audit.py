@@ -8,25 +8,25 @@ def observations():
     rows = []
     timeline = {
         "serve-model-request": ("00:00:00", "00:00:01"),
-        "api_prepare": ("00:00:00", "00:00:00.1"),
+        "api-server.api_prepare": ("00:00:00", "00:00:00.1"),
         "generate-response": ("00:00:00.1", "00:00:00.9"),
-        "engine_handoff": ("00:00:00.1", "00:00:00.15"),
-        "waiting_to_first_schedule": ("00:00:00.15", "00:00:00.2"),
-        "prefill": ("00:00:00.2", "00:00:00.4"),
-        "decode": ("00:00:00.4", "00:00:00.85"),
-        "engine_finalize": ("00:00:00.85", "00:00:00.9"),
-        "response_transfer": ("00:00:00.9", "00:00:01"),
+        "engine-core.engine_handoff": ("00:00:00.1", "00:00:00.15"),
+        "engine-core.waiting_to_first_schedule": ("00:00:00.15", "00:00:00.2"),
+        "engine-core.prefill": ("00:00:00.2", "00:00:00.4"),
+        "engine-core.decode": ("00:00:00.4", "00:00:00.85"),
+        "engine-core.engine_finalize": ("00:00:00.85", "00:00:00.9"),
+        "api-server.response_transfer": ("00:00:00.9", "00:00:01"),
     }
     for name, parent in (
         ("serve-model-request", None),
-        ("api_prepare", "serve-model-request"),
+        ("api-server.api_prepare", "serve-model-request"),
         ("generate-response", "serve-model-request"),
-        ("engine_handoff", "generate-response"),
-        ("waiting_to_first_schedule", "generate-response"),
-        ("prefill", "generate-response"),
-        ("decode", "generate-response"),
-        ("engine_finalize", "generate-response"),
-        ("response_transfer", "serve-model-request"),
+        ("engine-core.engine_handoff", "generate-response"),
+        ("engine-core.waiting_to_first_schedule", "generate-response"),
+        ("engine-core.prefill", "generate-response"),
+        ("engine-core.decode", "generate-response"),
+        ("engine-core.engine_finalize", "generate-response"),
+        ("api-server.response_transfer", "serve-model-request"),
     ):
         start, end = timeline[name]
         rows.append(
@@ -65,7 +65,7 @@ def test_real_model_audit_rejects_incorrect_decode_aggregation():
     script = Path(__file__).resolve().parents[1] / "scripts" / "verify_langfuse.py"
     audit = runpy.run_path(str(script))["audit_observations"]
     rows = observations()
-    decode = next(row for row in rows if row["name"] == "decode")
+    decode = next(row for row in rows if row["name"] == "engine-core.decode")
     decode["metadata"]["count"] = 3
     with pytest.raises(AssertionError):
         audit(rows, "a" * 32, "qwen-observed")

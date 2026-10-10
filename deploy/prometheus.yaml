@@ -1,3 +1,25 @@
 global:
   evaluation_interval: 10s
-scrape_configs: []
+rule_files:
+  - /etc/prometheus/prometheus-rules.yml
+scrape_configs:
+  - job_name: vllm
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["observer-vllm:8000"]
+  - job_name: vllm-prefill
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["vllm-pd-p:8000"]
+        labels:
+          role: prefill
+          group: qwen-pd-01
+          model: qwen-pd
+  - job_name: vllm-decode
+    scrape_interval: 5s
+    static_configs:
+      - targets: ["vllm-pd-d:8000"]
+        labels:
+          role: decode
+          group: qwen-pd-01
+          model: qwen-pd

@@ -16,6 +16,29 @@ logger = logging.getLogger("vllm_observer")
 
 TIMELINE_MODULE = "vllm-observer.timeline"
 
+# Exported span names are prefixed with the process/module that owns the
+# stage so the Langfuse waterfall reads api-server.* vs engine-core.*
+# directly. Root and generation keep their semantic names.
+MODULE_BY_STAGE = {
+    "api_prepare": "api-server",
+    "render_input": "api-server",
+    "sampling_params": "api-server",
+    "input_process": "api-server",
+    "submit_engine": "api-server",
+    "output_processor_add": "api-server",
+    "response_transfer": "api-server",
+    "engine_handoff": "engine-core",
+    "waiting_to_first_schedule": "engine-core",
+    "prefill": "engine-core",
+    "decode": "engine-core",
+    "engine_finalize": "engine-core",
+}
+
+
+def module_prefixed(name):
+    module = MODULE_BY_STAGE.get(name)
+    return f"{module}.{name}" if module else name
+
 
 def langfuse_sample_rate():
     """Head-sampling rate for normal requests (errors are always kept)."""
@@ -124,7 +147,7 @@ def _timeline_nodes(event, root, generation):
     api = _segment(
         uuid.uuid4().hex[:16],
         root["id"],
-        "api_prepare",
+        module_prefixed("api_prepare"),
         start,
         gen_start,
         note="routing + render + sampling + submit; details nested",
@@ -132,7 +155,7 @@ def _timeline_nodes(event, root, generation):
     transfer = _segment(
         uuid.uuid4().hex[:16],
         root["id"],
-        "response_transfer",
+        module_prefixed("response_transfer"),
         gen_end,
         end,
         note="detokenize + SSE flush + response completion",
@@ -151,24 +174,28 @@ def _timeline_nodes(event, root, generation):
         d_start = decode["start_ns"] if decode else p_start
         d_end = decode["end_ns"] if decode else (prefill or {}).get("end_ns", d_start)
         boundaries = [
-            ("engine_handoff", gen_start, clamp(w_start, gen_start, gen_end)),
             (
-                "waiting_to_first_schedule",
+                module_prefixed("engine_handoff"),
+                gen_start,
+                clamp(w_start, gen_start, gen_end),
+            ),
+            (
+                module_prefixed("waiting_to_first_schedule"),
                 clamp(w_start, gen_start, gen_end),
                 clamp(p_start, gen_start, gen_end),
             ),
             (
-                "prefill",
+                module_prefixed("prefill"),
                 clamp(p_start, gen_start, gen_end),
                 clamp(d_start, gen_start, gen_end),
             ),
             (
-                "decode",
+                module_prefixed("decode"),
                 clamp(d_start, gen_start, gen_end),
                 clamp(d_end, gen_start, gen_end),
             ),
             (
-                "engine_finalize",
+                module_prefixed("engine_finalize"),
                 clamp(d_end, gen_start, gen_end),
                 gen_end,
             ),
@@ -183,19 +210,19 @@ def _timeline_nodes(event, root, generation):
             if seg_end <= seg_start:
                 continue
             extra = {}
-            if name == "waiting_to_first_schedule" and waiting:
+            if name == module_prefixed("waiting_to_first_schedule") and waiting:
                 extra = dict(waiting.get("metadata", {}))
                 extra.pop("timing_source", None)
                 queue_meta = (engine.get("queue") or {}).get("metadata", {})
                 if "total_seconds" in queue_meta:
                     extra["queue_total_seconds"] = queue_meta["total_seconds"]
-            if name == "prefill" and prefill:
+            if name == module_prefixed("prefill") and prefill:
                 extra = {
                     k: v
                     for k, v in prefill.get("metadata", {}).items()
                     if k != "timing_source"
                 }
-            if name == "decode" and decode:
+            if name == module_prefixed("decode") and decode:
                 extra = {
                     k: v
                     for k, v in decode.get("metadata", {}).items()
@@ -235,6 +262,7 @@ def _timeline_nodes(event, root, generation):
             continue
         detail["parent_id"] = container["id"]
         assigned[detail["name"]] = detail
+        detail["name"] = module_prefixed(detail["name"])
         nodes.append(detail)
     submit = assigned.get("submit_engine")
     for node in event.get("api_intervals", []):

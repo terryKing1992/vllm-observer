@@ -21,22 +21,22 @@ from datetime import datetime, timedelta, timezone
 def audit_observations(rows, identifier, model="demo-model"):
     expected = {
         "serve-model-request",
-        "api_prepare",
+        "api-server.api_prepare",
         "generate-response",
-        "engine_handoff",
-        "waiting_to_first_schedule",
-        "prefill",
-        "decode",
-        "engine_finalize",
-        "response_transfer",
+        "engine-core.engine_handoff",
+        "engine-core.waiting_to_first_schedule",
+        "engine-core.prefill",
+        "engine-core.decode",
+        "engine-core.engine_finalize",
+        "api-server.response_transfer",
     }
-    # Real API-side detail intervals are nested under api_prepare.
+    # Real API-side detail intervals are nested under api-server.api_prepare.
     optional = {
-        "render_input",
-        "sampling_params",
-        "input_process",
-        "submit_engine",
-        "output_processor_add",
+        "api-server.render_input",
+        "api-server.sampling_params",
+        "api-server.input_process",
+        "api-server.submit_engine",
+        "api-server.output_processor_add",
     }
     names = {row["name"] for row in rows}
     assert expected <= names and names <= expected | optional
@@ -72,7 +72,12 @@ def audit_observations(rows, identifier, model="demo-model"):
             assert end <= datetime.fromisoformat(
                 parent["endTime"].replace("Z", "+00:00")
             )
-    for name in ("engine_handoff", "waiting_to_first_schedule", "prefill", "decode"):
+    for name in (
+        "engine-core.engine_handoff",
+        "engine-core.waiting_to_first_schedule",
+        "engine-core.prefill",
+        "engine-core.decode",
+    ):
         assert nodes[name]["type"] == "SPAN"
         assert nodes[name]["parentObservationId"] == generation["id"]
     # Top-level segments partition the request total exactly.
@@ -101,7 +106,7 @@ def audit_observations(rows, identifier, model="demo-model"):
             f"{parent['name']}: children sum {total}s != parent "
             f"{(p_end - p_start).total_seconds()}s"
         )
-    decode = nodes["decode"]["metadata"]
+    decode = nodes["engine-core.decode"]["metadata"]
     count = max(0, usage["output"] - 1)
     assert int(decode["count"]) == count
     mean = float(decode["total_ms"]) / count if count else 0

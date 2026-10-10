@@ -56,14 +56,14 @@ def test_real_otlp_serialization_preserves_trace_and_aggregates(monkeypatch):
     spans = {span.name: span for span in payload.resource_spans[0].scope_spans[0].spans}
     assert set(spans) == {
         "serve-model-request",
-        "api_prepare",
-        "response_transfer",
+        "api-server.api_prepare",
+        "api-server.response_transfer",
         "generate-response",
-        "engine_handoff",
-        "waiting_to_first_schedule",
-        "prefill",
-        "decode",
-        "engine_finalize",
+        "engine-core.engine_handoff",
+        "engine-core.waiting_to_first_schedule",
+        "engine-core.prefill",
+        "engine-core.decode",
+        "engine-core.engine_finalize",
     }
     for node in spans.values():
         assert node.trace_id.hex() == event.trace_id
@@ -85,18 +85,19 @@ def test_real_otlp_serialization_preserves_trace_and_aggregates(monkeypatch):
     assert gen_attrs["langfuse.observation.type"].string_value == "generation"
     assert gen_attrs["langfuse.observation.model.name"].string_value == "unit-model"
     for name in (
-        "engine_handoff",
-        "waiting_to_first_schedule",
-        "prefill",
-        "decode",
-        "engine_finalize",
+        "engine-core.engine_handoff",
+        "engine-core.waiting_to_first_schedule",
+        "engine-core.prefill",
+        "engine-core.decode",
+        "engine-core.engine_finalize",
     ):
         child = spans[name]
         assert child.parent_span_id == gen.span_id
         assert gen.start_time_unix_nano <= child.start_time_unix_nano
         assert child.end_time_unix_nano <= gen.end_time_unix_nano
     assert (
-        spans["decode"].end_time_unix_nano - spans["decode"].start_time_unix_nano
+        spans["engine-core.decode"].end_time_unix_nano
+        - spans["engine-core.decode"].start_time_unix_nano
         == 600_000_000
     )
     # The timeline is a strict partition: children of each parent cover it

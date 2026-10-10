@@ -1,0 +1,930 @@
+{
+ "uid": "vllm-pd",
+ "title": "vLLM PD 分离架构监控",
+ "tags": [
+  "vllm",
+  "pd"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 2,
+ "refresh": "10s",
+ "time": {
+  "from": "now-30m",
+  "to": "now"
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "row",
+   "title": "服务级聚合视图（group=qwen-pd-01，P/D 合一）",
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 2
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 2,
+   "type": "timeseries",
+   "title": "TTFT P95（取 prefill 侧）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "vllm_pd:ttft_seconds:p95",
+     "legendFormat": "TTFT P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 2,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 3,
+   "type": "timeseries",
+   "title": "TPOT P95（取 decode 侧）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "vllm_pd:tpot_seconds:p95",
+     "legendFormat": "TPOT P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 2,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 4,
+   "type": "timeseries",
+   "title": "吞吐：Prompt(P侧) / Generation(D侧)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "vllm_pd:prompt_tokens_per_sec",
+     "legendFormat": "prompt tok/s (P)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "vllm_pd:gen_tokens_per_sec",
+     "legendFormat": "gen tok/s (D)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 10,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 5,
+   "type": "timeseries",
+   "title": "请求成功率 stop ratio",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "sum by (group) (rate(vllm:request_success_total{role=\"decode\",finished_reason=\"stop\"}[5m])) / sum by (group) (rate(vllm:request_success_total{role=\"decode\"}[5m]))",
+     "legendFormat": "stop ratio",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 10,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 6,
+   "type": "row",
+   "title": "分角色视图（P/D 对比，不跨角色聚合）",
+   "gridPos": {
+    "x": 0,
+    "y": 18,
+    "w": 24,
+    "h": 2
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 7,
+   "type": "timeseries",
+   "title": "队列长度：Prefill vs Decode",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "vllm_pd:queue_waiting{role=\"prefill\"}",
+     "legendFormat": "P waiting",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "vllm_pd:queue_waiting{role=\"decode\"}",
+     "legendFormat": "D waiting",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "运行中请求：Prefill vs Decode",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "vllm_pd:requests_running{role=\"prefill\"}",
+     "legendFormat": "P running",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "vllm_pd:requests_running{role=\"decode\"}",
+     "legendFormat": "D running",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "KV Cache 使用率（按实例分列）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "vllm_pd:kv_cache_usage",
+     "legendFormat": "{{role}}/{{instance}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "实例存活（P/D）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "up{job=\"vllm-prefill\"}",
+     "legendFormat": "prefill up",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "up{job=\"vllm-decode\"}",
+     "legendFormat": "decode up",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 11,
+   "type": "row",
+   "title": "阶段耗时拆解（PD 架构关键视角）",
+   "gridPos": {
+    "x": 0,
+    "y": 36,
+    "w": 24,
+    "h": 2
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "Prefill 阶段耗时 P95（按角色）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "histogram_quantile(0.95, sum by (group, role, le) (rate(vllm:request_prefill_time_seconds_bucket[5m])))",
+     "legendFormat": "{{role}} P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 38,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Decode 阶段耗时 P95（按角色）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "histogram_quantile(0.95, sum by (group, role, le) (rate(vllm:request_decode_time_seconds_bucket[5m])))",
+     "legendFormat": "{{role}} P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 38,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 14,
+   "type": "timeseries",
+   "title": "Token 间隔时延 P95（体感流畅度）",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "histogram_quantile(0.95, sum by (group, role, le) (rate(vllm:inter_token_latency_seconds_bucket[5m])))",
+     "legendFormat": "{{role}} P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "histogram_quantile(0.99, sum by (group, role, le) (rate(vllm:inter_token_latency_seconds_bucket[5m])))",
+     "legendFormat": "{{role}} P99",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 46,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 15,
+   "type": "timeseries",
+   "title": "推理总耗时（不含排队）P95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "histogram_quantile(0.95, sum by (group, role, le) (rate(vllm:request_inference_time_seconds_bucket[5m])))",
+     "legendFormat": "{{role}} P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 46,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 16,
+   "type": "row",
+   "title": "缓存与请求画像",
+   "gridPos": {
+    "x": 0,
+    "y": 54,
+    "w": 24,
+    "h": 2
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 17,
+   "type": "timeseries",
+   "title": "前缀缓存命中率",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "sum by (group, role, le) (rate(vllm:prefix_cache_hits_total[5m])) / sum by (group, role, le) (rate(vllm:prefix_cache_queries_total[5m]))",
+     "legendFormat": "{{role}} hit rate",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 56,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 18,
+   "type": "timeseries",
+   "title": "外部前缀缓存命中数",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "sum by (group, role, le) (rate(vllm:external_prefix_cache_hits_total[5m]))",
+     "legendFormat": "{{role}} hits/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 56,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "pps"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 19,
+   "type": "timeseries",
+   "title": "Prompt 长度分布 P50/P95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "histogram_quantile(0.5, sum by (group, role, le) (rate(vllm:request_prompt_tokens_bucket[5m])))",
+     "legendFormat": "{{role}} P50",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "histogram_quantile(0.95, sum by (group, role, le) (rate(vllm:request_prompt_tokens_bucket[5m])))",
+     "legendFormat": "{{role}} P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 64,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 20,
+   "type": "timeseries",
+   "title": "生成长度分布 P50/P95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "histogram_quantile(0.5, sum by (group, role, le) (rate(vllm:request_generation_tokens_bucket[5m])))",
+     "legendFormat": "{{role}} P50",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "histogram_quantile(0.95, sum by (group, role, le) (rate(vllm:request_generation_tokens_bucket[5m])))",
+     "legendFormat": "{{role}} P95",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 64,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 21,
+   "type": "timeseries",
+   "title": "排队原因细分",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "sum by (role, waiting_reason) (vllm:num_requests_waiting_by_reason)",
+     "legendFormat": "{{role}}/{{waiting_reason}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 72,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 22,
+   "type": "timeseries",
+   "title": "算力利用估算 FLOPs/GPU",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "sum by (group, role, le) (rate(vllm:estimated_flops_per_gpu_total[5m]))",
+     "legendFormat": "{{role}} FLOPs",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 72,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 23,
+   "type": "timeseries",
+   "title": "KV Cache 抢占速率",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "sum by (group, role, le) (rate(vllm:num_preemptions_total[5m]))",
+     "legendFormat": "{{role}} preemptions/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 0,
+    "y": 80,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  },
+  {
+   "id": 24,
+   "type": "timeseries",
+   "title": "GPU 内存读写带宽估算",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "targets": [
+    {
+     "refId": "a",
+     "expr": "sum by (group, role, le) (rate(vllm:estimated_read_bytes_per_gpu_total[5m]))",
+     "legendFormat": "{{role}} read B/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    },
+    {
+     "refId": "b",
+     "expr": "sum by (group, role, le) (rate(vllm:estimated_write_bytes_per_gpu_total[5m]))",
+     "legendFormat": "{{role}} write B/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "range": true
+    }
+   ],
+   "gridPos": {
+    "x": 12,
+    "y": 80,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "Bps"
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "bottom"
+    }
+   }
+  }
+ ]
+}
